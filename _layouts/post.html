@@ -1,144 +1,53 @@
----
-layout: page
-refactor: true
-pannel_includes:
-  - toc
-tail_includes:
-  - related-posts
-  - post-nav
-  - comments
----
+<!DOCTYPE HTML>
+<html lang="en" >
+    <head>
 
-{% include lang.html %}
+        {%- include head.html -%}
 
-{% if page.image.src %}
-  {% capture bg %}
-    {% unless page.image.no_bg %}{{ 'bg' }}{% endunless %}
-  {% endcapture %}
-  <img src="{{ page.image.src }}" class="preview-img {{ bg | strip }}"
-      alt="{{ page.image.alt | default: "Preview Image" }}"
+        {% if page.previous %}
+            <link rel="prev" href="{{site.baseurl}}{{page.previous.url}}" />
+        {% else %}
+            <link rel="prev" href="{{site.baseurl}}/" />
+        {% endif %}
 
-      {% if page.image.width %}
-        width="{{ page.image.width }}"
-      {% elsif page.image.w %}
-        width="{{ page.image.w }}"
-      {% endif %}
+        {% if page.next %}
+            <link rel="next" href="{{site.baseurl}}{{page.next.url}}" />
+        {% endif %}
+    </head>
+    <body>
+        <div class="book">
 
-      {% if page.image.height %}
-        height="{{ page.image.height }}"
-      {% elsif page.image.h %}
-        height="{{ page.image.h }}"
-      {% endif %}>
-{% endif %}
+            {%- include toc-date.html -%}
 
-<h1 data-toc-skip>{{ page.title }}</h1>
+            <div class="book-body">
+                {%- include body.html -%}
 
-<div class="post-meta text-muted">
+                {% if page.previous %}
+                    <a href="{{site.baseurl}}{{page.previous.url}}" class="navigation navigation-prev navigation-unique" aria-label="Previous page: {{page.previous.title}}">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+                {% else %}
+                    <a href="{{site.baseurl}}/" class="navigation navigation-prev navigation-unique" aria-label="Previous page: {{site.title}}">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+                {% endif %}
 
-  <!-- author -->
-  <div>
-    {% capture author_name %}{{ page.author.name | default: site.social.name }}{% endcapture %}
-    {% assign author_link = nil %}
+                {% if page.next %}
+                    <a href="{{site.baseurl}}{{page.next.url}}" class="navigation navigation-next navigation-unique" aria-label="Next page: {{page.next.title}}">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+                {% endif %}
+            </div>
 
-    {% if page.author.link %}
-      {% assign author_link = page.author.link %}
-    {% elsif author_name == site.social.name %}
-      {% assign author_link = site.social.links[0] %}
-    {% endif %}
+            <script>
+            var gitbook = gitbook || [];
+            gitbook.push(function() {
+                gitbook.page.hasChanged({%- include metadata-post.json.tpl -%});
+            });
+            </script>
+        </div>
 
-    {{ site.data.locales[lang].post.written_by }}
-    <em>
-      {% if author_link %}
-        <a href="{{ author_link }}">{{ author_name }}</a>
-      {% else %}
-        {{ author_name }}
-      {% endif %}
-    </em>
-  </div>
+        {%- include footer.html -%}
 
-  <div class="d-flex">
-    <div>
-      <!-- published date -->
-      <span>
-        {{ site.data.locales[lang].post.posted }}
-        {% include timeago.html date=page.date tooltip=true %}
-      </span>
-
-      <!-- lastmod date -->
-      {% if page.last_modified_at %}
-      <span>
-        {{ site.data.locales[lang].post.updated }}
-        {% include timeago.html date=page.last_modified_at tooltip=true %}
-      </span>
-      {% endif %}
-
-      <!-- read time -->
-      {% include read-time.html content=content prompt=true %}
-
-      <!-- page views -->
-      {% if site.google_analytics.pv.proxy_endpoint or site.google_analytics.pv.cache_path %}
-      <span>
-        <em id="pv" class="pageviews">
-          <i class="fas fa-spinner fa-spin fa-fw"></i>
-        </em>
-        {{ site.data.locales[lang].post.pageview_measure }}
-      </span>
-      {% endif %}
-    </div>
-
-  </div> <!-- .d-flex -->
-
-</div> <!-- .post-meta -->
-
-<div class="post-content">
-  {{ content }}
-</div>
-
-<div class="post-tail-wrapper text-muted">
-
-  <!-- categories -->
-  {% if page.categories.size > 0 %}
-  <div class="post-meta mb-3">
-    <i class="far fa-folder-open fa-fw mr-1"></i>
-    {% for category in page.categories %}
-      <a href='{{ site.baseurl }}/categories/{{ category | slugify | url_encode }}/'>{{ category }}</a>
-      {%- unless forloop.last -%}, {%- endunless -%}
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  <!-- tags -->
-  {% if page.tags.size > 0 %}
-  <div class="post-tags">
-    <i class="fa fa-tags fa-fw mr-1"></i>
-      {% for tag in page.tags %}
-      <a href="{{ site.baseurl }}/tags/{{ tag | slugify | url_encode }}/"
-          class="post-tag no-text-decoration" >
-        {{- tag -}}
-      </a>
-      {% endfor %}
-  </div>
-  {% endif %}
-
-  <div class="post-tail-bottom
-    d-flex justify-content-between align-items-center mt-3 pt-5 pb-2">
-    <div class="license-wrapper">
-
-      {% if site.data.locales[lang].copyright.license.template %}
-
-        {% capture _replacement %}
-        <a href="{{ site.data.locales[lang].copyright.license.link }}">
-          {{ site.data.locales[lang].copyright.license.name }}
-        </a>
-        {% endcapture %}
-
-        {{ site.data.locales[lang].copyright.license.template | replace: ':LICENSE_NAME', _replacement }}
-
-      {% endif %}
-    </div>
-
-    {% include post-sharing.html %}
-
-  </div><!-- .post-tail-bottom -->
-
-</div><!-- div.post-tail-wrapper -->
+    </body>
+</html>
