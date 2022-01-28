@@ -1,48 +1,79 @@
-# Configurations
-title:            Leetcode Solution By Yuyang Liu
-longtitle:        Leetcode Solution By Yuyang Liu
-author:           Yuyang Liu
-email:            yl8019@nyu.edu
-description: >
+# ----
+# Site
 
-version:          1.0
-gitbook_version:  3.2.3
+title: Edition Template
+url: "https://long-pig.cloudvent.net"
+baseurl:
+google_analytics_key:
+show_full_navigation: true
 
-url:              'https://nightingalelyy.github.io'
-baseurl:          '/'
-rss:              RSS
+# Values for the jekyll-seo-tag gem (https://github.com/jekyll/jekyll-seo-tag)
+logo: /siteicon.png
+description: Product documentation template for Jekyll.
+author:
+  name:
+  email:
+  twitter: # twitter username without the @ symbol
+social:
+  name: Edition Template
+  links:
+    - https://github.com/CloudCannon/edition-jekyll-template
 
-toc:
-  enabled: true
-  h_min: 1
-  h_max: 3
+# -----
+# Build
 
-# markdown render engine.
-markdown:         kramdown
-kramdown:
-  auto_ids:               true
-  input:                  GFM
-  math_engine:            mathjax
-  smart_quotes:           lsquo,rsquo,ldquo,rdquo
-  toc_levels:             1..6
-  syntax_highlighter:     rouge
-  syntax_highlighter_opts:
-    guess_lang:           true
+timezone: Etc/UTC
 
-syntax_highlighter_style: colorful
-
-markdown_ext:     markdown,mkdown,mkdn,mkd,md
-
-# Permalinks
-permalink:        /:categories/:year-:month-:day-:title:output_ext
-
-exclude:
-  - _drafts
-
-destination:      ./_site
-incremental:      false
-regenerate:       true
+permalink: pretty
 
 plugins:
+  - jekyll-sitemap
+  - jekyll-seo-tag
   - jekyll-feed
-  - jemoji
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - README.md
+  - LICENCE
+
+collections:
+  docs:
+    title: Documentation
+    permalink: /:path/
+    output: true
+
+defaults:
+  -
+    scope:
+      path: ""
+    values:
+      layout: default
+  -
+    scope:
+      path: ""
+      type: "docs"
+    values:
+      seo:
+        type: Article
+      _comments:
+        category: Group navigation links with this field
+        order: Used to sort links in the navigation
+      _options:
+        content:
+          width: 800
+          height: 2000
+  -
+    scope:
+      path: ""
+      type: "posts"
+    values:
+      _comments:
+        type: Marks the impact of this release
+
+# -----------
+# CloudCannon
+
+types:
+  - minor
+  - major
