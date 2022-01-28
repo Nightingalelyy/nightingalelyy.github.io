@@ -4,7 +4,6 @@ longtitle:        Leetcode Solution By Yuyang Liu
 author:           Yuyang Liu
 email:            yl8019@nyu.edu
 description: >
-  Build Jekyll site with the GitBook style.
 
 version:          1.0
 gitbook_version:  3.2.3
