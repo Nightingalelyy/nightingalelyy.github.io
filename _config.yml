@@ -1,16 +1,16 @@
 # Configurations
-title:            Jekyll Gitbook
-longtitle:        Jekyll Gitbook
-author:           HE Tao
-email:            sighingnow@gmail.com
+title:            Leetcode Solution By Yuyang Liu
+longtitle:        Leetcode Solution By Yuyang Liu
+author:           Yuyang Liu
+email:            yl8019@nyu.edu
 description: >
   Build Jekyll site with the GitBook style.
 
 version:          1.0
 gitbook_version:  3.2.3
 
-url:              'https://sighingnow.github.io'
-baseurl:          '/jekyll-gitbook'
+url:              'https://nightingalelyy.github.io'
+baseurl:          '/'
 rss:              RSS
 
 toc:
