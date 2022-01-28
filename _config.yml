@@ -1,8 +1,8 @@
 # ----
 # Site
 
-title: Edition Template
-url: "https://long-pig.cloudvent.net"
+title: Yuyang Liu's Blog
+url: "nightingalelyy.github.io"
 baseurl:
 google_analytics_key:
 show_full_navigation: true
@@ -13,11 +13,11 @@ description: Product documentation template for Jekyll.
 author:
   name:
   email:
-  twitter: # twitter username without the @ symbol
+  twitter: 
 social:
-  name: Edition Template
+  name: 
   links:
-    - https://github.com/CloudCannon/edition-jekyll-template
+  
 
 # -----
 # Build
