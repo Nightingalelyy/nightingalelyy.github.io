@@ -1,0 +1,140 @@
+# Publishing access comes from GitHub repository permissions and Pages CMS
+# collaborator invitations, not from this editor configuration.
+media:
+  - name: images
+    label: Images
+    input: images/uploads
+    output: /images/uploads
+    categories: [image]
+    rename: safe
+
+content:
+  - name: articles
+    label: Articles
+    type: collection
+    path: _docs
+    format: yaml-frontmatter
+    subfolders: true
+    filename:
+      template: "{year}-{month}-{day}-{primary}.md"
+      field: create
+    exclude:
+      - _defaults.md
+      - readme.md
+      - 1.md
+      - .DS_Store
+    operations:
+      create: true
+      rename: false
+      delete: true
+    view:
+      layout: list
+      fields: [title, category, date]
+      primary: title
+      sort: [date, title, category, order]
+      search: [title, category, body]
+      default:
+        sort: date
+        order: desc
+    fields:
+      - name: title
+        label: Title
+        type: string
+        required: true
+      - name: author
+        label: Author
+        type: string
+        default: Yuyang Liu
+      - name: date
+        label: Date
+        type: date
+        required: true
+        options:
+          format: yyyy-MM-dd
+      - name: category
+        label: Category
+        type: string
+        required: true
+        default: Articles
+        description: Use an existing category or enter a new one. This controls the group in the site navigation.
+      - name: order
+        label: Navigation order
+        type: number
+        default: 1000
+        options:
+          min: 0
+        description: Lower numbers appear first within a category.
+      - name: body
+        label: Article
+        type: rich-text
+        options:
+          format: markdown
+          switcher: true
+          media: images
+        description: Switch to Source to edit Markdown and code blocks directly.
+
+  - name: homepage
+    label: Homepage
+    type: file
+    path: index.md
+    format: yaml-frontmatter
+    operations:
+      create: false
+      rename: false
+      delete: false
+    fields:
+      - name: title
+        label: Title
+        type: string
+        required: true
+      - name: body
+        label: Page content
+        type: rich-text
+        options:
+          format: markdown
+          switcher: true
+          media: images
+
+  - name: not-found
+    label: Not found page
+    type: file
+    path: 404.md
+    format: yaml-frontmatter
+    operations:
+      create: false
+      rename: false
+      delete: false
+    fields:
+      - name: title
+        label: Title
+        type: string
+        required: true
+      - name: body
+        label: Page content
+        type: rich-text
+        options:
+          format: markdown
+          switcher: true
+          media: images
+
+  - name: site
+    label: Site settings
+    type: file
+    path: _config.yml
+    format: yaml
+    operations:
+      create: false
+      rename: false
+      delete: false
+    fields:
+      - name: title
+        label: Site title
+        type: string
+        required: true
+      - name: description
+        label: Site description
+        type: text
+
+settings:
+  content:
+    merge: true

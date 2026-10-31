@@ -1,68 +1,76 @@
-# Edition
+# Yuyang Liu's Blog
 
-Product documentation template for Jekyll. Browse through a [live demo](https://long-pig.cloudvent.net/).
-Start documenting your product, application, service or website with this configurable theme.
+Jekyll site at <https://nightingalelyy.github.io>, published by GitHub Pages from
+the root of `main`. The design is based on CloudCannon's Edition theme.
 
-![Edition template screenshot](images/_screenshot.png)
+## Edit the site
 
-Edition was made by [CloudCannon](http://cloudcannon.com/), the Cloud CMS for Jekyll.
+Open <https://nightingalelyy.github.io/admin/> and follow **Open Pages CMS**.
+Sign in with the `Nightingalelyy` GitHub account.
 
-Find more templates, themes and step-by-step Jekyll tutorials at [CloudCannon Academy](https://learn.cloudcannon.com/).
+- **Articles:** edit existing write-ups or select **New** to create an article.
+- **Homepage:** edit the homepage title and content.
+- **Not found page:** edit the message displayed for missing pages.
+- **Site settings:** edit the site title and description.
+- **Images:** upload images to use in articles and pages.
 
-[![Deploy to CloudCannon](https://buttons.cloudcannon.com/deploy.svg)](https://app.cloudcannon.com/register#sites/connect/github/CloudCannon/edition-jekyll-template)
+For a new article, enter a title, date, category, and body. The editor suggests a
+date-based filename. Articles default to the **Articles** category; use an existing
+category for a LeetCode write-up. The category determines the navigation section,
+and the order field sorts articles within that section. Lower numbers appear first.
 
-## Features
+The article editor supports formatted text and Markdown source. Use the source
+switch for existing articles with C++ code blocks or HTML such as `<sup>`. Review
+the result before saving. Uploaded images are stored in `images/uploads/`.
 
-* Two column layout
-* Full text search
-* Pre-styled components
-* Auto-generated navigation based on category
-* Optimised for editing in [CloudCannon](http://cloudcannon.com/)
-* Change log
-* RSS/Atom feed
-* SEO tags
-* Google Analytics
+**Save writes to `main` and starts publication.** Wait for the GitHub Pages build
+to finish, then check the live page. Saved work is not a private draft: this is a
+public repository. Git history keeps earlier versions of each file.
 
-## Setup
+Existing filenames are kept when editing, so changing a title does not change its
+URL. File renaming is disabled in the CMS to protect existing links.
 
-1. Add your site and author details in `_config.yml`.
-2. Get a workflow going to see your site's output (with [CloudCannon](https://app.cloudcannon.com/) or Jekyll locally).
+## Pages CMS connection and access
 
-## Develop
+The Pages CMS GitHub App should use **Only select repositories**, with only
+`nightingalelyy.github.io` selected. Open this repository on `main` in Pages CMS;
+the editor reads `.pages.yml` from that branch.
 
-Edition was built with [Jekyll](http://jekyllrb.com/) version 3.3.1, but should support newer versions as well.
+Publishing access is controlled by GitHub repository write permissions and Pages
+CMS collaborator invitations. For an owner-only setup, keep GitHub collaborators
+and pending invitations empty and do not invite CMS collaborators. The public
+Admin link does not grant editing access. No password or access token is stored
+in this repository.
 
-Install the dependencies with [Bundler](http://bundler.io/):
+## Content and configuration
 
-~~~bash
-$ bundle install
-~~~
+- `_docs/`: articles, organized into category folders.
+- `index.md`: homepage.
+- `_layouts/default.html`: shared page and navigation layout.
+- `css/main.scss` and `_sass/`: styles.
+- `_config.yml`: Jekyll configuration.
+- `.pages.yml`: CMS fields, collections, and media configuration.
 
-Run `jekyll` commands through Bundler to ensure you're using the right versions:
+Pages CMS merges configured fields into existing metadata so fields outside the
+editor schema are retained. Empty template and placeholder files are excluded
+from the article list. The existing `_posts`/changelog template is separate from
+the article collection.
 
-~~~bash
-$ bundle exec jekyll serve
-~~~
+## Local development
 
-## Editing
+The repository pins Jekyll 3.8.4 and its plugins in `Gemfile` and `Gemfile.lock`.
+With a compatible Ruby/Bundler environment:
 
-Edition is already optimised for adding, updating and removing documentation pages in CloudCannon.
+```sh
+bundle install
+bundle exec jekyll serve
+```
 
-### Documentation pages
+Open <http://localhost:4000>. For a production-mode build:
 
-* Add, update or remove a documentation page in the *Documentation* collection.
-* Change the category of a documentation page to move it to another section in the navigation.
-* Documentation pages are organised in the navigation by category, with URLs based on the path inside the `_docs` folder.
+```sh
+JEKYLL_ENV=production bundle exec jekyll build
+```
 
-### Change log
-
-* Add, update or remove change log entries from your posts.
-* Tag entries as minor or major in the front matter.
-
-### Search
-
-* Add `excluded_in_search: true` to any documentation page's front matter to exclude that page in the search results.
-
-### Navigation
-
-* Change `site.show_full_navigation` to control all or only the current navigation group being open.
+GitHub Pages uses its managed Jekyll build, so its installed versions may differ
+from the historical local lockfile.
