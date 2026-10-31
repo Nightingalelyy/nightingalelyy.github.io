@@ -33,6 +33,7 @@ plugins:
 
 exclude:
   - .pages.yml
+  - desktop
   - Gemfile
   - Gemfile.lock
   - README.md

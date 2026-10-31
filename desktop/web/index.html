@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>Nightingale Writer</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">N</span><span>Nightingale <strong>Writer</strong></span></div>
+        <div class="header-center"><span class="site-indicator"></span>Yuyang Liu’s Blog</div>
+        <button id="sync-button" class="button quiet" title="Get the latest articles and publish queued changes"><span data-icon="refresh"></span><span>Sync</span></button>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar" aria-label="Library">
+          <button id="new-button" class="button new-button"><span data-icon="plus"></span>New article<span class="shortcut">⌘N</span></button>
+          <div class="section-label">LIBRARY</div>
+          <nav id="library-nav">
+            <button class="nav-item active" data-filter="all"><span data-icon="articles"></span><span>All articles</span><span class="count" id="all-count">—</span></button>
+            <button class="nav-item" data-filter="drafts"><span data-icon="edit"></span><span>Local drafts</span><span class="count" id="draft-count">0</span></button>
+            <button class="nav-item" data-filter="queued"><span data-icon="upload"></span><span>Publish queue</span><span class="count" id="queue-count">0</span></button>
+            <button class="nav-item" data-filter="pages"><span data-icon="page"></span><span>Pages</span><span class="count" id="page-count">2</span></button>
+          </nav>
+          <div class="section-label categories-label">CATEGORIES</div>
+          <nav id="category-nav" aria-label="Article categories"></nav>
+          <div class="sidebar-bottom">
+            <a href="https://app.pagescms.org/Nightingalelyy/nightingalelyy.github.io/main" class="external-link"><span data-icon="globe"></span>Open web editor<span data-icon="arrow-up-right"></span></a>
+            <div class="local-note"><span data-icon="laptop"></span><span>Your drafts stay on this Mac<br><strong>until you choose Publish.</strong></span></div>
+          </div>
+        </aside>
+
+        <section class="article-list-panel" aria-label="Articles">
+          <div class="list-heading"><h1 id="list-title">All articles</h1><span id="list-count">0</span></div>
+          <label class="search-box"><span data-icon="search"></span><input id="search" type="search" placeholder="Search your writing" aria-label="Search articles" autocomplete="off" /><kbd>⌘F</kbd></label>
+          <div id="article-list" role="group" aria-label="Article list"></div>
+          <div class="list-footer"><span id="list-caption">Loading your library…</span></div>
+        </section>
+
+        <main class="editor-panel" id="editor-panel">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-symbol" data-icon="feather"></div>
+            <h2 id="empty-title">Your writing, ready anywhere.</h2>
+            <p id="empty-message">Opening your local library…</p>
+            <button id="retry-button" class="button primary" hidden>Try again</button>
+          </div>
+          <div id="document" hidden>
+            <div class="document-toolbar">
+              <div class="document-location"><span data-icon="page"></span><span id="document-category">Article</span><span class="small-dot">·</span><span id="document-state">Saved</span></div>
+              <div class="document-actions">
+                <button id="discard-button" class="icon-button muted" title="Discard local changes" aria-label="Discard local draft" hidden><span data-icon="trash"></span></button>
+                <button id="cancel-queue-button" class="button quiet" hidden>Cancel queued publish</button>
+                <button id="save-button" class="button quiet"><span data-icon="check"></span><span id="save-label">Saved</span></button>
+                <button id="publish-button" class="button primary"><span data-icon="upload"></span><span>Publish</span></button>
+              </div>
+            </div>
+            <div id="conflict-banner" class="notice conflict-notice" hidden><span data-icon="alert"></span><span>This article also changed online. Review both versions before publishing.</span><button id="review-conflict-button" class="button small">Review</button></div>
+            <div id="queued-banner" class="notice queue-notice" hidden><span data-icon="clock"></span><span id="queued-message">This version is queued for publication. New edits remain local.</span></div>
+            <div class="document-header">
+              <label class="title-label" for="title-input">Title</label>
+              <input id="title-input" class="document-title" type="text" placeholder="Untitled article" aria-label="Article title" autocomplete="off" />
+              <div class="metadata-row" id="article-metadata">
+                <label class="metadata-field"><span data-icon="calendar"></span><input id="date-input" type="date" aria-label="Article date" /></label>
+                <label class="metadata-field category-field"><span data-icon="folder"></span><input id="category-input" type="text" aria-label="Article category" list="category-options" placeholder="Category" autocomplete="off" /></label>
+                <datalist id="category-options"></datalist>
+                <button id="details-button" class="button quiet small" aria-expanded="false"><span data-icon="sliders"></span>Details</button>
+              </div>
+              <div id="extra-metadata" class="extra-metadata" hidden><label>Author<input id="author-input" type="text" autocomplete="off" /></label><label>Navigation order<input id="order-input" type="number" min="0" step="1" /></label></div>
+            </div>
+            <div class="writing-toolbar">
+              <div class="segmented-control" role="group" aria-label="Editor view"><button class="active" data-view="write" aria-pressed="true">Write</button><button data-view="split" aria-pressed="false">Split</button><button data-view="preview" aria-pressed="false">Preview</button></div>
+              <div class="writing-tools"><span class="markdown-hint">Markdown</span><button id="image-button" class="button quiet small"><span data-icon="image"></span>Add image</button></div>
+            </div>
+            <div id="writing-area" class="writing-area view-write">
+              <div id="code-editor" aria-label="Markdown writing area"></div>
+              <div id="preview-scroll" class="preview-scroll"><article id="preview" class="markdown-preview"></article><p class="preview-footnote">Images hosted elsewhere may need an internet connection.</p></div>
+            </div>
+            <footer class="document-footer"><span id="word-count">0 words</span><span id="save-status" aria-live="polite">Saved locally</span><span id="document-path"></span></footer>
+          </div>
+        </main>
+      </div>
+      <footer class="app-status"><span id="connection-dot" class="status-dot"></span><span id="connection-status" aria-live="polite">Opening your library…</span><span class="status-spacer"></span><span id="last-sync"></span></footer>
+    </div>
+
+    <dialog id="new-dialog" class="modal">
+      <form id="new-form">
+        <div class="modal-heading"><span class="modal-icon" data-icon="feather"></span><button type="button" class="icon-button" data-close="new-dialog" aria-label="Close new article"><span data-icon="close"></span></button></div>
+        <h2>A new article</h2><p class="modal-description">Start writing now. Publish when you’re ready.</p>
+        <label>Title<input id="new-title" type="text" placeholder="What’s on your mind?" required maxlength="180" autocomplete="off" /></label>
+        <div class="modal-row"><label>Category<input id="new-category" type="text" value="Articles" list="category-options" required autocomplete="off" /></label><label>Date<input id="new-date" type="date" required /></label></div>
+        <div id="new-error" class="inline-error" hidden></div>
+        <div class="modal-actions"><button type="button" class="button" data-close="new-dialog">Cancel</button><button type="submit" id="create-button" class="button primary">Create local draft<span data-icon="arrow-right"></span></button></div>
+      </form>
+    </dialog>
+
+    <dialog id="conflict-dialog" class="modal conflict-modal">
+      <div class="modal-heading"><span class="modal-icon amber" data-icon="alert"></span><button type="button" class="icon-button" data-close="conflict-dialog" aria-label="Close conflict review"><span data-icon="close"></span></button></div>
+      <h2>Choose what to keep</h2><p class="modal-description">Your local draft and the online article both changed. Review them, then save your resolved version locally.</p>
+      <div class="conflict-columns"><section><div class="conflict-column-title"><h3>Your local draft</h3><button id="keep-local-button" class="button small">Use this version</button></div><textarea id="conflict-local" readonly aria-label="Your local version" spellcheck="false"></textarea></section><section><div class="conflict-column-title"><h3>Latest online version</h3><button id="keep-remote-button" class="button small">Use this version</button></div><textarea id="conflict-remote" readonly aria-label="Latest online version" spellcheck="false"></textarea></section></div>
+      <details class="base-details"><summary>View the original version</summary><textarea id="conflict-base" readonly aria-label="Original version" spellcheck="false"></textarea></details>
+      <label>Resolved version<textarea id="conflict-resolved" aria-label="Resolved version" spellcheck="false"></textarea></label>
+      <div class="modal-actions"><span class="modal-help">You can publish after resolving.</span><button type="button" class="button" data-close="conflict-dialog">Cancel</button><button id="resolve-button" class="button primary">Save resolution locally</button></div>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="modal confirmation-modal"><h2>Discard this local draft?</h2><p id="confirm-message" class="modal-description">The online article will stay unchanged.</p><div class="modal-actions"><button id="confirm-cancel" class="button">Keep draft</button><button id="confirm-discard" class="button danger">Discard local draft</button></div></dialog>
+    <div id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>
