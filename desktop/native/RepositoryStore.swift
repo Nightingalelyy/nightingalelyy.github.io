@@ -33,6 +33,8 @@ private struct WriterState: Codable {
     var drafts: [String: WriterDraft] = [:]
     var queue: [String: WriterQueueEntry] = [:]
     var conflicts: [String: WriterConflict] = [:]
+    // Optional so state written before local categories were introduced still decodes.
+    var categories: [String]?
     var state = "ready"
     var message = "Ready to write offline."
     var lastSyncedAt: String?
@@ -86,6 +88,23 @@ final class RepositoryStore {
         try initialize()
         switch method {
         case "bootstrap", "status", "listArticles": return try bootstrap()
+        case "createCategory":
+            let supplied = try string(params, "name")
+            guard !supplied.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) else {
+                throw fail("Category names cannot contain control characters or line breaks.")
+            }
+            let name = supplied.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
+            guard !name.isEmpty, name.count <= 80 else { throw fail("Enter a category name between 1 and 80 characters.") }
+            let canonical = (state.categories ?? []).first {
+                $0.compare(name, options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) == .orderedSame
+            } ?? name
+            if !(state.categories ?? []).contains(canonical) {
+                state.categories = (state.categories ?? []) + [canonical]
+                try persist()
+            }
+            var result = try bootstrap()
+            result["category"] = canonical
+            return result
         case "readArticle": return try articleJSON(path: string(params, "path"))
         case "saveDraft":
             return try saveDraft(path: string(params, "path"), raw: string(params, "rawContent"),
@@ -275,7 +294,7 @@ final class RepositoryStore {
 
     private func bootstrap() throws -> [String: Any] {
         let paths = Set(articles.keys).union(state.drafts.keys).sorted()
-        return ["articles": try paths.map { try articleJSON(path: $0) }, "status": statusJSON(),
+        return ["articles": try paths.map { try articleJSON(path: $0) }, "categories": state.categories ?? [], "status": statusJSON(),
                 "repositoryPath": repository.path, "remoteURL": remoteURL, "branch": "main"]
     }
 

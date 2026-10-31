@@ -39,7 +39,7 @@ document.querySelectorAll('[data-icon]').forEach((node) => { node.innerHTML = ic
 const md = new MarkdownIt({ html: true, linkify: true, breaks: false });
 const editable = new Compartment();
 const state = {
-  articles: [], active: null, parsed: null, initialFields: {}, savedRaw: '', filter: 'all', query: '', view: 'write',
+  articles: [], categories: [], active: null, parsed: null, initialFields: {}, savedRaw: '', filter: 'all', query: '', view: 'write',
   status: {}, busy: false, publishing: false, transitioning: false, editVersion: 0, selectionVersion: 0, ready: false,
 };
 let editor;
@@ -99,6 +99,7 @@ function updateArticle(item) {
 }
 function applySnapshot(snapshot, { updateDocument = true } = {}) {
   if (Array.isArray(snapshot?.articles)) state.articles = snapshot.articles.map(enrich);
+  if (Array.isArray(snapshot?.categories)) state.categories = snapshot.categories;
   if (snapshot?.status) state.status = snapshot.status;
   if (updateDocument && state.active) {
     const updated = state.articles.find((article) => article.path === state.active.path);
@@ -110,6 +111,9 @@ function applySnapshot(snapshot, { updateDocument = true } = {}) {
   }
   renderLibrary(); renderStatus(); renderDocumentStatus();
 }
+function allCategories() {
+  return [...new Set([...state.categories, ...state.articles.filter((item) => item.path.startsWith('_docs/')).map((item) => item.meta.category)])].sort((a, b) => a.localeCompare(b));
+}
 function renderLibrary() {
   const articles = state.articles.filter((item) => item.path.startsWith('_docs/'));
   const drafts = state.articles.filter((item) => item.isDraft);
@@ -119,7 +123,7 @@ function renderLibrary() {
   $('#draft-count').textContent = drafts.length;
   $('#queue-count').textContent = queued.length;
   $('#page-count').textContent = pages.length;
-  const categories = [...new Set(articles.map((item) => item.meta.category))].sort((a, b) => a.localeCompare(b));
+  const categories = allCategories();
   $('#category-nav').innerHTML = categories.map((category) => `<button class="nav-item${state.filter === `category:${category}` ? ' active' : ''}" data-category="${escapeHTML(category)}"><span class="category-dot"></span><span>${escapeHTML(category)}</span><span class="count">${articles.filter((item) => item.meta.category === category).length}</span></button>`).join('');
   $('#category-options').innerHTML = [...new Set(['Articles', ...categories])].map((category) => `<option value="${escapeHTML(category)}"></option>`).join('');
   document.querySelectorAll('[data-filter]').forEach((button) => button.classList.toggle('active', button.dataset.filter === state.filter));
@@ -145,6 +149,9 @@ function renderLibrary() {
     const badges = [item.conflict ? '<span class="badge conflict">Needs review</span>' : '', item.isQueued ? '<span class="badge queued">Queued</span>' : '', item.isDraft ? '<span class="badge draft">Local draft</span>' : ''].filter(Boolean).join('');
     return `<button class="article-row${state.active?.path === item.path ? ' selected' : ''}" data-path="${escapeHTML(item.path)}" aria-label="${escapeHTML(item.meta.title)}${item.isDraft ? ', local draft' : ''}"${state.active?.path === item.path ? ' aria-current="true"' : ''}><div class="article-row-top"><span class="article-category">${escapeHTML(item.meta.category)}</span><span class="article-date">${escapeHTML(dateLabel)}</span></div><div class="article-title">${escapeHTML(item.meta.title)}</div><div class="article-excerpt">${escapeHTML(excerpt || 'A new beginning…')}</div>${badges ? `<div class="article-badges">${badges}</div>` : ''}</button>`;
   }).join('') || `<div class="list-empty"><strong>${state.query ? 'No matching articles' : state.filter === 'queued' ? 'Nothing waiting to publish' : state.filter === 'drafts' ? 'A clean writing desk' : 'No entries yet'}</strong>${state.query ? 'Try a different word or category.' : state.filter === 'drafts' ? 'Edits you save locally will appear here.' : state.filter === 'queued' ? 'Choose Publish on an article when it is ready.' : 'Create an article to start writing.'}</div>`;
+  if (!visible.length && !state.query && state.filter.startsWith('category:')) {
+    $('#article-list').innerHTML = '<div class="list-empty"><strong>No articles yet</strong>Create your first article in this category.<button type="button" class="button primary" data-new-article>New article</button></div>';
+  }
 }
 function renderStatus() {
   const status = state.status;
@@ -164,6 +171,7 @@ function renderStatus() {
   const stamp = status.lastSyncedAt ? new Date(status.lastSyncedAt) : null;
   $('#last-sync').textContent = stamp && !Number.isNaN(stamp.getTime()) ? `Last synced ${stamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
   $('#sync-button').disabled = state.busy || !state.ready;
+  $('#add-category-button').disabled = state.busy || state.transitioning || !state.ready;
 }
 function renderDocumentStatus() {
   if (!state.active) return;
@@ -191,6 +199,7 @@ function renderDocumentStatus() {
 }
 function setTransition(value) {
   state.transitioning = value;
+  $('#add-category-button').disabled = value || state.busy || !state.ready;
   $('#editor-panel').classList.toggle('is-transitioning', value);
   document.querySelectorAll('#document input').forEach((input) => { input.disabled = value; });
   editor?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(!value)) });
@@ -364,6 +373,46 @@ async function publishCurrent() {
   } catch (error) { showError(error); }
   finally { state.publishing = false; renderDocumentStatus(); }
 }
+function newCategory() {
+  if (!state.ready || state.busy || state.publishing || state.transitioning || document.querySelector('dialog[open]')) return;
+  $('#category-name').value = '';
+  $('#category-error').hidden = true;
+  $('#category-dialog').showModal();
+  $('#category-name').focus();
+}
+async function createCategory(event) {
+  event.preventDefault();
+  if ($('#create-category-button').disabled) return;
+  const name = $('#category-name').value.normalize('NFC').trim();
+  if (!name || [...name].length > 80 || /[\u0000-\u001f\u007f-\u009f]/u.test(name)) {
+    $('#category-error').textContent = 'Enter a category name of 1–80 characters on one line.';
+    $('#category-error').hidden = false;
+    return;
+  }
+  $('#create-category-button').disabled = true;
+  setTransition(true);
+  try {
+    await saveCurrent();
+    const existing = allCategories().find((category) => category.normalize('NFC').toLocaleLowerCase() === name.toLocaleLowerCase());
+    let category = existing;
+    if (!existing) {
+      const snapshot = await api.createCategory(name);
+      applySnapshot(snapshot);
+      category = snapshot.category || name;
+    }
+    state.filter = `category:${category}`;
+    state.query = ''; $('#search').value = '';
+    renderLibrary();
+    $('#category-dialog').close();
+    showToast(existing ? `Opened the existing ${category} category.` : `Created ${category}. Choose New article to start writing.`);
+  } catch (error) {
+    $('#category-error').textContent = error.message || String(error);
+    $('#category-error').hidden = false;
+  } finally {
+    $('#create-category-button').disabled = false;
+    setTransition(false);
+  }
+}
 async function newArticle() {
   if (!state.ready || state.transitioning || document.querySelector('dialog[open]')) return;
   $('#new-title').value = '';
@@ -499,6 +548,7 @@ $('#category-nav').addEventListener('click', (event) => {
   state.filter = `category:${button.dataset.category}`; renderLibrary();
 });
 $('#article-list').addEventListener('click', (event) => {
+  if (event.target.closest('[data-new-article]')) { newArticle(); return; }
   const button = event.target.closest('[data-path]');
   if (button) selectArticle(button.dataset.path);
 });
@@ -508,6 +558,8 @@ $('#save-button').addEventListener('click', () => saveCurrent().catch(showError)
 $('#publish-button').addEventListener('click', publishCurrent);
 $('#sync-button').addEventListener('click', () => runSync());
 $('#new-button').addEventListener('click', newArticle);
+$('#add-category-button').addEventListener('click', newCategory);
+$('#category-form').addEventListener('submit', createCategory);
 $('#new-form').addEventListener('submit', createArticle);
 $('#image-button').addEventListener('click', addImage);
 $('#retry-button').addEventListener('click', bootstrap);

@@ -93,7 +93,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         NSApp.mainMenu = bar
     }
 
-    @objc private func showAbout() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Nightingale Writer", .applicationVersion: "0.1.0", .credits: NSAttributedString(string: "Write offline. Publish when you're ready.")]) }
+    @objc private func showAbout() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Nightingale Writer", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", .credits: NSAttributedString(string: "Write offline. Publish when you're ready.")]) }
     @objc private func newArticle() { webView.evaluateJavaScript("window.writer?.newArticle?.()") }
     @objc private func saveArticle() { webView.evaluateJavaScript("window.writer?.saveCurrent?.()") }
     @objc private func refreshArticles() { webView.evaluateJavaScript("window.writer?.refresh?.()") }
@@ -113,7 +113,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         if method == "chooseImage" { chooseImage(id: id); return }
         if method == "openCMS" { openCMS(); respond(id, result: [:]); return }
         if method == "openSite" { openSite(); respond(id, result: [:]); return }
-        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "refresh", "queuePublish", "processQueue", "resolveConflict", "importImage", "readAsset", "cancelQueued", "discardDraft"]
+        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "refresh", "queuePublish", "processQueue", "resolveConflict", "importImage", "readAsset", "cancelQueued", "discardDraft"]
         guard allowed.contains(method) else { respond(id, error: "Unknown operation."); return }
         worker.async { [weak self] in
             guard let self = self else { return }

@@ -24,6 +24,11 @@ online and locally, publication stops for review. The app retains the base,
 queued, and remote versions. Save a resolution locally, then choose Publish.
 It never force-pushes.
 
+Use **+** beside **Categories** to add a category. Empty categories are kept on
+this Mac across restarts. Select a category and choose **New article** to start
+writing in it. You can also type a new category into an existing article's
+Category field. A category appears on the website when an article in it is published.
+
 The **Homepage** and **Not found page** can also be edited. Existing filenames and
 unmanaged frontmatter are preserved. New article names are generated from their
 date and title. External image URLs may not load offline; images inserted through

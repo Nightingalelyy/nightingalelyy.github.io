@@ -26,7 +26,7 @@
             <button class="nav-item" data-filter="queued"><span data-icon="upload"></span><span>Publish queue</span><span class="count" id="queue-count">0</span></button>
             <button class="nav-item" data-filter="pages"><span data-icon="page"></span><span>Pages</span><span class="count" id="page-count">2</span></button>
           </nav>
-          <div class="section-label categories-label">CATEGORIES</div>
+          <div class="categories-heading"><div class="section-label">CATEGORIES</div><button id="add-category-button" class="icon-button" title="Add category" aria-label="Add category" disabled><span data-icon="plus"></span></button></div>
           <nav id="category-nav" aria-label="Article categories"></nav>
           <div class="sidebar-bottom">
             <a href="https://app.pagescms.org/Nightingalelyy/nightingalelyy.github.io/main" class="external-link"><span data-icon="globe"></span>Open web editor<span data-icon="arrow-up-right"></span></a>
@@ -85,6 +85,16 @@
       </div>
       <footer class="app-status"><span id="connection-dot" class="status-dot"></span><span id="connection-status" aria-live="polite">Opening your library…</span><span class="status-spacer"></span><span id="last-sync"></span></footer>
     </div>
+
+    <dialog id="category-dialog" class="modal">
+      <form id="category-form">
+        <div class="modal-heading"><span class="modal-icon" data-icon="folder"></span><button type="button" class="icon-button" data-close="category-dialog" aria-label="Close new category"><span data-icon="close"></span></button></div>
+        <h2>New category</h2><p class="modal-description">Organize your writing. This category stays on your Mac until you publish an article in it.</p>
+        <label>Category name<input id="category-name" type="text" placeholder="For example, Travel or Reading" required maxlength="80" autocomplete="off" /></label>
+        <div id="category-error" class="inline-error" role="alert" hidden></div>
+        <div class="modal-actions"><button type="button" class="button" data-close="category-dialog">Cancel</button><button type="submit" id="create-category-button" class="button primary">Create category</button></div>
+      </form>
+    </dialog>
 
     <dialog id="new-dialog" class="modal">
       <form id="new-form">

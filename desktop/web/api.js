@@ -15,6 +15,7 @@ export const api = {
   read: (path) => call('readArticle', { path }),
   save: (path, rawContent, expectedRevision) => call('saveDraft', { path, rawContent, expectedRevision }),
   create: (path, rawContent) => call('createArticle', { path, rawContent }),
+  createCategory: (name) => call('createCategory', { name }),
   refresh: () => call('refresh'),
   queue: (path) => call('queuePublish', { path }),
   process: () => call('processQueue'),

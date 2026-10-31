@@ -191,7 +191,54 @@ struct RepositoryStoreTests {
         let credentialCheck = try offlineRestart.handle(method: "verifyPublishAccess")
         try expect(status(credentialCheck)["message"] as? String == "GitHub publishing credentials verified. No changes were published.", "Dry-run publish access should succeed without content changes")
 
+        // Upgrade existing local storage without changing drafts, queued versions, or conflicts.
+        let categoryDataRoot = root.appendingPathComponent("category-app-data")
+        let categorySeed = RepositoryStore(root: categoryDataRoot, remoteURL: remote.path, seedRepo: source, identity: identity)
+        _ = try categorySeed.handle(method: "bootstrap")
+        let categoryDraftPath = "_docs/2026-11-01-category-migration.md"
+        let categoryDraftRaw = raw("Migration draft", body: "This draft and its queued snapshot must survive the storage upgrade.")
+        _ = try categorySeed.handle(method: "createArticle", params: ["path": categoryDraftPath, "rawContent": categoryDraftRaw])
+        try queue(categorySeed, categoryDraftPath)
+        let categoryStatePath = categoryDataRoot.appendingPathComponent("state.json")
+        var legacyState = try JSONSerialization.jsonObject(with: Data(contentsOf: categoryStatePath)) as! [String: Any]
+        legacyState.removeValue(forKey: "categories")
+        legacyState["conflicts"] = [categoryDraftPath: ["base": "", "local": categoryDraftRaw, "remote": "A preserved online version."]]
+        legacyState["state"] = "conflict"
+        legacyState["message"] = "Conflicting edits need review. Both versions are saved."
+        try JSONSerialization.data(withJSONObject: legacyState).write(to: categoryStatePath, options: .atomic)
+        let legacyDrafts = legacyState["drafts"] as! NSDictionary
+        let legacyQueue = legacyState["queue"] as! NSDictionary
+        let legacyConflicts = legacyState["conflicts"] as! NSDictionary
+        let remoteBeforeCategory = try git(["rev-parse", "main"], at: remote)
+        let categoryStore = RepositoryStore(root: categoryDataRoot, remoteURL: remote.path, identity: identity)
+        let upgraded = try categoryStore.handle(method: "bootstrap")
+        try expect(upgraded["categories"] as? [String] == [], "Old state without categories must load with an empty category list")
+        try expect(status(upgraded)["queuedCount"] as? Int == 1 && status(upgraded)["draftCount"] as? Int == 1, "Migration must preserve draft and queue counts")
+        let createdCategory = try categoryStore.handle(method: "createCategory", params: ["name": "  Cafe\u{301}  "])
+        let canonicalCategory = createdCategory["category"] as! String
+        try expect(canonicalCategory.utf8.elementsEqual("Café".utf8), "Category creation must trim and precompose Unicode")
+        try expect(createdCategory["categories"] as? [String] == ["Café"], "An explicit empty category must be returned in bootstrap")
+        try expect(status(createdCategory)["state"] as? String == "conflict", "Creating a category must not clear the existing sync state")
+        let duplicateCategory = try categoryStore.handle(method: "createCategory", params: ["name": "CAFÉ"])
+        try expect(duplicateCategory["category"] as? String == "Café" && duplicateCategory["categories"] as? [String] == ["Café"], "Case-insensitive duplicates must return the original canonical category")
+        let savedCategoryState = try JSONSerialization.jsonObject(with: Data(contentsOf: categoryStatePath)) as! [String: Any]
+        try expect(legacyDrafts.isEqual(savedCategoryState["drafts"]), "Category storage must retain original draft data")
+        try expect(legacyQueue.isEqual(savedCategoryState["queue"]), "Category storage must retain original publication snapshot")
+        try expect(legacyConflicts.isEqual(savedCategoryState["conflicts"]), "Category storage must retain all conflict versions")
+        let categoryRestart = RepositoryStore(root: categoryDataRoot, remoteURL: remote.path, identity: identity)
+        let restartedCategories = try categoryRestart.handle(method: "bootstrap")
+        try expect(restartedCategories["categories"] as? [String] == ["Café"], "Empty categories must survive app restart")
+        let refreshedCategories = try categoryRestart.handle(method: "refresh")
+        try expect(refreshedCategories["categories"] as? [String] == ["Café"], "Empty categories must survive repository synchronization")
+        try expect(try git(["rev-parse", "main"], at: remote) == remoteBeforeCategory, "Category creation must not publish or change Git history")
+        for name in ["", "   ", "A\nB", "A\rB", "\tTab", "Null\u{0}", "Line\u{2028}break", String(repeating: "界", count: 81)] {
+            try rejects("Invalid category name must be rejected") { _ = try categoryRestart.handle(method: "createCategory", params: ["name": name]) }
+        }
+        let longestCategory = String(repeating: "界", count: 80)
+        let validLongCategory = try categoryRestart.handle(method: "createCategory", params: ["name": longestCategory])
+        try expect(validLongCategory["category"] as? String == longestCategory, "An 80-character Unicode category must be accepted")
+
         print("RepositoryStore integration tests passed: \(assertions) assertions")
-        print("Covered offline restart, safe saves, immutable queued versions, publish, conflicts, explicit resolution, new-file collision, raster assets, scoped writes, and path validation.")
+        print("Covered offline restart, safe saves, immutable queued versions, publish, conflicts, explicit resolution, new-file collision, raster assets, scoped writes, path validation, and local category migration/persistence.")
     }
 }
