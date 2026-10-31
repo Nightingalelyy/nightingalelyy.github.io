@@ -14,8 +14,8 @@ Sign in with the `Nightingalelyy` GitHub account.
 - **Site settings:** edit the site title and description.
 - **Images:** upload images to use in articles and pages.
 
-For a new article, enter a title, date, category, and body. The editor suggests a
-date-based filename. Articles default to the **Articles** category; use an existing
+For a new article, enter a title, date, category, and body. The editor generates a
+date-based filename from the title when you save. Articles default to the **Articles** category; use an existing
 category for a LeetCode write-up. The category determines the navigation section,
 and the order field sorts articles within that section. Lower numbers appear first.
 

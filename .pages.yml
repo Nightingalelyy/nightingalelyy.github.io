@@ -17,7 +17,7 @@ content:
     subfolders: true
     filename:
       template: "{year}-{month}-{day}-{primary}.md"
-      field: create
+      field: false
     exclude:
       - _defaults.md
       - readme.md
