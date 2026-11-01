@@ -22,7 +22,9 @@ social:
 # -----
 # Build
 
-timezone: Etc/UTC
+# Match the author's calendar day so publishing after midnight in China does
+# not hide a new article until the UTC day catches up eight hours later.
+timezone: Asia/Shanghai
 
 permalink: pretty
 
@@ -41,6 +43,7 @@ exclude:
   - .pages.yml
   - desktop
   - publishing
+  - vendor
   - Gemfile
   - Gemfile.lock
   - README.md

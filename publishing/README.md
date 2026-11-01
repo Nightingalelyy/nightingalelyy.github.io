@@ -51,6 +51,11 @@ HTML, including fenced, indented, inline, and raw HTML code. It does not normali
 away whitespace differences. Fixtures prove invalid source and template-induced
 code corruption cannot produce a successful publication manifest.
 
+Article dates use the site's `Asia/Shanghai` timezone. A date-only article written
+after midnight in China can publish immediately, even while the UTC build runner
+is on the previous date. Fixed-clock fixtures verify this boundary and retain
+Jekyll's normal future-date filtering.
+
 Successful builds write `publication-manifest.json` containing the commit,
 build time, and each published source file's SHA-256 and actual Jekyll URL.
 It contains only information about published files, never local draft state.
