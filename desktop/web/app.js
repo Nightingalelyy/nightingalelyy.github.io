@@ -118,6 +118,7 @@ function updateArticle(item) {
   return next;
 }
 function applySnapshot(snapshot, { updateDocument = true } = {}) {
+  if (snapshot?.categoryChange && state.filter === `category:${snapshot.categoryChange.from}`) state.filter = `category:${snapshot.categoryChange.to}`;
   if (snapshot?.recovery) {
     const access = workspaceRecovery(snapshot);
     state.recoveryMode = access.needsRestore;
