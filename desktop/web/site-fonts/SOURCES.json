@@ -1,0 +1,323 @@
+{
+  "description": "Unmodified Google Fonts files used by the personal site, bundled for offline previews. Font-family names and every returned style, weight, and unicode-range are preserved in ../site-fonts.css.",
+  "retrievedAt": "2026-11-01T15:07:05.368889+00:00",
+  "stylesheet": {
+    "sourceURL": "https://fonts.googleapis.com/css?family=Merriweather:400,400italic,700,700italic%7COpen+Sans:400,400italic,600,600italic,700,700italic%7CInconsolata:400,700",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "sourceSHA256": "33b4df9777d1e72811e9e0680f9fa1554dc716535c94ad835df9b7640251e10c",
+    "bundledFile": "../site-fonts.css",
+    "bundledSHA256": "f926621bc27b2c099cd95b09b5f671d95747d03f8f887b8d823a3e1628664d79"
+  },
+  "coverage": {
+    "Inconsolata": {
+      "normal 400": 3,
+      "normal 700": 3
+    },
+    "Merriweather": {
+      "italic 400": 5,
+      "italic 700": 5,
+      "normal 400": 5,
+      "normal 700": 5
+    },
+    "Open Sans": {
+      "italic 400": 10,
+      "italic 600": 10,
+      "italic 700": 10,
+      "normal 400": 10,
+      "normal 600": 10,
+      "normal 700": 10
+    }
+  },
+  "fontFaceRules": 86,
+  "uniqueSourceURLs": 33,
+  "uniqueBundledFontFiles": 33,
+  "fonts": [
+    {
+      "file": "inconsolata-36b1d9723a02.woff2",
+      "family": "Inconsolata",
+      "sourceURL": "https://fonts.gstatic.com/s/inconsolata/v37/QlddNThLqRwH-OJ1UHjlKENVzkWGVkL3GZQmAwLyx615IDhunJ_o.woff2",
+      "sha256": "36b1d9723a02800e46379a0b7c78550e1ffc9880e1fe9d3b51711548f846d0a0",
+      "bytes": 25556,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "inconsolata-c8b182c185f6.woff2",
+      "family": "Inconsolata",
+      "sourceURL": "https://fonts.gstatic.com/s/inconsolata/v37/QlddNThLqRwH-OJ1UHjlKENVzkWGVkL3GZQmAwLyxq15IDhunJ_o.woff2",
+      "sha256": "c8b182c185f60c3c56b0c59cac9f00a7ddd5c1771c56c16398c7cb6e3d7621e3",
+      "bytes": 8632,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "inconsolata-9f330ef4aa42.woff2",
+      "family": "Inconsolata",
+      "sourceURL": "https://fonts.gstatic.com/s/inconsolata/v37/QlddNThLqRwH-OJ1UHjlKENVzkWGVkL3GZQmAwLyya15IDhunA.woff2",
+      "sha256": "9f330ef4aa423d083046fe006a54f1be21a8e00d05b14ee43d50167b0496db46",
+      "bytes": 29020,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-55f42ec97763.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4c0qyriQwlOrhSvowK_l5-eTxCVx0ZbwLvKH2Gk9hLmp0v5yA-xXPqCzLvF--drHOg7iDTFw.woff2",
+      "sha256": "55f42ec97763d0328d7b40c4b72a7f01305562375906f04671d9c2e2bde0d7c8",
+      "bytes": 54288,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-c838938937cb.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4c0qyriQwlOrhSvowK_l5-eTxCVx0ZbwLvKH2Gk9hLmp0v5yA-xXPqCzLvF-SdrHOg7iDTFw.woff2",
+      "sha256": "c838938937cb4770be33e79ef4af7e2e5ca2a20aad002d8c30978e7509e7ea99",
+      "bytes": 12236,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-9f801499ae34.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4c0qyriQwlOrhSvowK_l5-eTxCVx0ZbwLvKH2Gk9hLmp0v5yA-xXPqCzLvF-WdrHOg7iDTFw.woff2",
+      "sha256": "9f801499ae341cd088dc8ff48667756803d0d097593905e7ba1e5c8d9b6ff996",
+      "bytes": 78032,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-92c27e300c52.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4c0qyriQwlOrhSvowK_l5-eTxCVx0ZbwLvKH2Gk9hLmp0v5yA-xXPqCzLvF-adrHOg7iDTFw.woff2",
+      "sha256": "92c27e300c5274a39e71278553361bf95d5f47088c2bd69f6a99e333c42bcb35",
+      "bytes": 38372,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-a81373d3b74e.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4c0qyriQwlOrhSvowK_l5-eTxCVx0ZbwLvKH2Gk9hLmp0v5yA-xXPqCzLvF-udrHOg7iA.woff2",
+      "sha256": "a81373d3b74e7a7bac2e22eade484e873772519e7e9cd81ee1f717d4408a84ab",
+      "bytes": 100620,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-f66e5c189009.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4e0qyriQwlOrhSvowK_l5UcA6zuSYEqOzpPe3HOZJ5eX1WtLaQwmYiSeqkJ-mXq1Gi3iE.woff2",
+      "sha256": "f66e5c1890094c8a646b74a27fbd8f15e748003c43575a5ea18b726a7727349f",
+      "bytes": 74940,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-53049794c25a.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4e0qyriQwlOrhSvowK_l5UcA6zuSYEqOzpPe3HOZJ5eX1WtLaQwmYiSeqlJ-mXq1Gi3iE.woff2",
+      "sha256": "53049794c25af8b4a5e2b4b9c2345c47b8f0fdc65ec6e93b18fea74eae2ce956",
+      "bytes": 10872,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-7e1822475854.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4e0qyriQwlOrhSvowK_l5UcA6zuSYEqOzpPe3HOZJ5eX1WtLaQwmYiSeqnJ-mXq1Gi3iE.woff2",
+      "sha256": "7e1822475854e1dee82df16f836b79a59c6630d350b781970c8be782b8793db8",
+      "bytes": 33792,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-af1be39e2ff6.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4e0qyriQwlOrhSvowK_l5UcA6zuSYEqOzpPe3HOZJ5eX1WtLaQwmYiSeqqJ-mXq1Gi.woff2",
+      "sha256": "af1be39e2ff60ede976bc3a93b9aceb3ac7103207b21a62d1971e3ea8cf95b97",
+      "bytes": 97608,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "merriweather-ed391ae49db1.woff2",
+      "family": "Merriweather",
+      "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4e0qyriQwlOrhSvowK_l5UcA6zuSYEqOzpPe3HOZJ5eX1WtLaQwmYiSequJ-mXq1Gi3iE.woff2",
+      "sha256": "ed391ae49db1a5c477ed280eb6411b4df5ae83324c90fd695f5e1b7331a9cae0",
+      "bytes": 51604,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-2ab7e5428568.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqW106FxZCJgvAQ.woff2",
+      "sha256": "2ab7e542856893292c87cb8360711840fb5bd51515da476071db40aed265de0d",
+      "bytes": 22548,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-2e9001fa91a2.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWt06FxZCJgvAQ.woff2",
+      "sha256": "2e9001fa91a298120a6ab2e7062fb761c0153a1fa82a55f0485d1a8dd63cdc0d",
+      "bytes": 33076,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-9e3854ef6ec3.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWtE6FxZCJgvAQ.woff2",
+      "sha256": "9e3854ef6ec35c5d1eb595a16eeaba1d8ccc8163dec80a619d18e79c1767ddc0",
+      "bytes": 49560,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-2d33900c7634.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWtU6FxZCJgvAQ.woff2",
+      "sha256": "2d33900c7634b4b05998b731c6196f60c4cb55ec9c914757f35d8b1a88d86586",
+      "bytes": 1960,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-ee911bf4535a.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWtk6FxZCJgvAQ.woff2",
+      "sha256": "ee911bf4535ad47ae36b8a7eeec8d9edf09db223f334b68430baa9b9de3f6e4a",
+      "bytes": 13620,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-59ad762c87d0.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWu06FxZCJgvAQ.woff2",
+      "sha256": "59ad762c87d0ecc1279b9f0b9a56cc6bfb9108df00ecca16eb642864f3ff7e2a",
+      "bytes": 14664,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-8df90accd45b.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWuU6FxZCJgg.woff2",
+      "sha256": "8df90accd45bfd23e80b325300058648f6d4b293d1c8f399dfa4cda318d203e0",
+      "bytes": 45072,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-1f07f2a82120.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWuk6FxZCJgvAQ.woff2",
+      "sha256": "1f07f2a82120e4c7a75cc9cdbd763ed3f5cc22c71978dfbe9868b828108ca7fc",
+      "bytes": 19196,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-fb404ecf11c2.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWvU6FxZCJgvAQ.woff2",
+      "sha256": "fb404ecf11c29b99dc565fbce13fb6a6d0eb95554c7a009d96a0bf4c5d750c09",
+      "bytes": 28048,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-78e155cef75b.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memtYaGs126MiZpBA-UFUIcVXSCEkx2cmqvXlWqWxU6FxZCJgvAQ.woff2",
+      "sha256": "78e155cef75b228f74cdfa2e87becaa6dbbf8200f0021f3be57e39890ef307f7",
+      "bytes": 51112,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-441af0def989.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTS-mu0SC55I.woff2",
+      "sha256": "441af0def989ebfdbd6ad85ffaed85e967ab21a05f1dd342f16259464a206dd0",
+      "bytes": 42964,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-3e8f4b311fef.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTS2mu0SC55K5gw.woff2",
+      "sha256": "3e8f4b311fef0dc52856f9bee03af7ef4f8bdaa26e4bfb8a0a766b79e5351bc4",
+      "bytes": 13608,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-f49cd0972b92.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTSCmu0SC55K5gw.woff2",
+      "sha256": "f49cd0972b92df6ad4d34589333df653d9fcedcf3ecb71cf8191441b4e1a6081",
+      "bytes": 12960,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-2d4c25a2a206.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTSGmu0SC55K5gw.woff2",
+      "sha256": "2d4c25a2a206d16537302b054f6a3b847ff79175207963a5fed6e12af26dd8e0",
+      "bytes": 30624,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-d0edd1c6d7e0.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTSKmu0SC55K5gw.woff2",
+      "sha256": "d0edd1c6d7e0e0cd8b9146888db311e0472e09be88faf70bb01ad57e17316551",
+      "bytes": 44028,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-d68a324be8ff.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTSOmu0SC55K5gw.woff2",
+      "sha256": "d68a324be8ffcb8b21734398f8419885b526a3cc8443786dcdacff5fb0560727",
+      "bytes": 1768,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-01978402fabb.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTSumu0SC55K5gw.woff2",
+      "sha256": "01978402fabbdca7d046ebda60da8bae6ea9b5420e58af6350bcbeffc74af097",
+      "bytes": 22836,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-206b8987ebc5.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTSymu0SC55K5gw.woff2",
+      "sha256": "206b8987ebc5510c1f3add37d9dd1f308559224fa9b45805d024eebf7425e90c",
+      "bytes": 17708,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-c9d43888d700.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTUGmu0SC55K5gw.woff2",
+      "sha256": "c9d43888d70004923f98079bd0e68cabec6275d22829ef4fe9c12a71b4c336a4",
+      "bytes": 22680,
+      "contentType": "font/woff2"
+    },
+    {
+      "file": "open-sans-4f0cad5800ee.woff2",
+      "family": "Open Sans",
+      "sourceURL": "https://fonts.gstatic.com/s/opensans/v44/memvYaGs126MiZpBA-UvWbX2vVnXBbObj2OVTVOmu0SC55K5gw.woff2",
+      "sha256": "4f0cad5800eed7600b524be7d5b99a5510a792ba8f83427a4a2c553fc49164ec",
+      "bytes": 46884,
+      "contentType": "font/woff2"
+    }
+  ],
+  "licenses": [
+    {
+      "family": "Merriweather",
+      "file": "OFL-Merriweather.txt",
+      "sourceURL": "https://raw.githubusercontent.com/google/fonts/main/ofl/merriweather/OFL.txt",
+      "sha256": "715bd349bfa6116f99e351e1548321dcfa25b91df65502d22ca8d624557697d2",
+      "bytes": 4438
+    },
+    {
+      "family": "Open Sans",
+      "file": "OFL-Open-Sans.txt",
+      "sourceURL": "https://raw.githubusercontent.com/google/fonts/main/ofl/opensans/OFL.txt",
+      "sha256": "fbbbcfef55318de350562559b671360de6d597112ecc5c73881b05092db89602",
+      "bytes": 4389
+    },
+    {
+      "family": "Inconsolata",
+      "file": "OFL-Inconsolata.txt",
+      "sourceURL": "https://raw.githubusercontent.com/google/fonts/main/ofl/inconsolata/OFL.txt",
+      "sha256": "29bd0cfd0fb2a45f9b057c834a057724bae1f63b525a8ac83d3e7525706d9f80",
+      "bytes": 4350
+    }
+  ]
+}

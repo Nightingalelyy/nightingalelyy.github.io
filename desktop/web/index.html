@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; frame-src 'self' about:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <title>Nightingale Writer</title>
     <link rel="stylesheet" href="./styles.css" />
     <script defer src="./app.js"></script>
@@ -75,9 +75,18 @@
               <div class="segmented-control" role="group" aria-label="Editor view"><button class="active" data-view="write" aria-pressed="true">Write</button><button data-view="split" aria-pressed="false">Split</button><button data-view="preview" aria-pressed="false">Preview</button></div>
               <div class="writing-tools"><span class="markdown-hint">Markdown</span><button id="image-button" class="button quiet small"><span data-icon="image"></span>Add image</button></div>
             </div>
+            <div id="preview-options" class="preview-options" hidden>
+              <span class="preview-caption">Website preview</span>
+              <div class="segmented-control preview-devices" role="group" aria-label="Preview device"><button class="active" data-preview-device="desktop" aria-pressed="true">Desktop</button><button data-preview-device="mobile" aria-pressed="false">Mobile</button></div>
+              <span id="preview-size-label" class="preview-size-label">Desktop · 800 px article</span>
+            </div>
             <div id="writing-area" class="writing-area view-write">
               <div id="code-editor" aria-label="Markdown writing area"></div>
-              <div id="preview-scroll" class="preview-scroll"><article id="preview" class="markdown-preview"></article><p class="preview-footnote">Images hosted elsewhere may need an internet connection.</p></div>
+              <section id="preview-scroll" class="site-preview-scroll" aria-label="Website preview viewport" tabindex="0">
+                <div id="preview-canvas" class="site-preview-canvas" data-device="desktop">
+                  <iframe id="site-preview-frame" srcdoc="__NIGHTINGALE_PREVIEW_HTML__" sandbox="allow-same-origin" title="Website article preview"></iframe>
+                </div>
+              </section>
             </div>
             <footer class="document-footer"><span id="word-count">0 words</span><span id="save-status" aria-live="polite">Saved locally</span><span id="document-path"></span></footer>
           </div>

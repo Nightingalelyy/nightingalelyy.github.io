@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildSitePreview } from './site-preview.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repo = path.dirname(root);
@@ -16,8 +17,9 @@ fs.mkdirSync(path.join(root, '.build', 'module-cache'), { recursive: true });
 const nativeSnapshot = path.join(root, '.build', 'native-source');
 fs.mkdirSync(nativeSnapshot, { recursive: true });
 for (const file of ['Main.swift', 'RepositoryStore.swift']) fs.copyFileSync(path.join(root, 'native', file), path.join(nativeSnapshot, file));
+buildSitePreview(path.join(resources, 'web'));
 await build({ entryPoints: [path.join(root, 'web/app.js')], bundle: true, format: 'iife', target: 'safari16', outfile: path.join(resources, 'web/app.js'), minify: true, sourcemap: false, logLevel: 'info' });
-for (const file of ['index.html', 'styles.css']) fs.copyFileSync(path.join(root, 'web', file), path.join(resources, 'web', file));
+fs.copyFileSync(path.join(root, 'web/styles.css'), path.join(resources, 'web/styles.css'));
 run('/usr/bin/swiftc', ['-swift-version', '5', ...(process.env.WRITER_DEBUG_BUILD ? [] : ['-O']), '-parse-as-library', '-module-cache-path', path.join(root, '.build/module-cache'), '-target', 'arm64-apple-macosx13.0', path.join(nativeSnapshot, 'Main.swift'), path.join(nativeSnapshot, 'RepositoryStore.swift'), '-framework', 'AppKit', '-framework', 'WebKit', '-o', path.join(app, 'Contents/MacOS/NightingaleWriter')]);
 
 const seed = path.join(resources, 'Seed.git');
@@ -42,8 +44,8 @@ fs.writeFileSync(path.join(app, 'Contents/Info.plist'), `<?xml version="1.0" enc
 <key>CFBundleIdentifier</key><string>io.github.nightingalelyy.writer</string>
 <key>CFBundleExecutable</key><string>NightingaleWriter</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.2</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>0.1.3</string>
+<key>CFBundleVersion</key><string>4</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>

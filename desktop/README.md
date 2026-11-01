@@ -10,7 +10,10 @@ library is available on the first launch without an internet connection.
 
 1. Select an article, or use **New article** to start one.
 2. Edit the title, category, date, and Markdown. Changes save on this Mac.
-3. Use the preview to check formatting. Inserted images are also stored locally.
+3. Use **Preview** to check the website's fonts, title, spacing, and article width.
+   Choose **Desktop** or **Mobile** to check wrapping at each size. **Split** keeps
+   the editor alongside the preview; a narrow pane can scroll horizontally.
+   Inserted images are also stored locally.
 4. Choose **Publish** when a saved version is ready to go online.
 
 Publishing queues the selected version. If GitHub cannot be reached, the queue
@@ -37,6 +40,14 @@ the app are available locally.
 Press **Enter** for a visible line break in both the preview and the published
 site. Leave a blank line to start a separate paragraph. Code blocks keep their
 original spacing and line breaks.
+
+The preview bundles the site's Merriweather, Open Sans, and Inconsolata fonts,
+so typography works offline. Desktop shows an 800 px article at a 1200 px site
+viewport, with navigation cropped away. Mobile uses a 390 px viewport. Neither
+mode scales the text. The app compiles the website's own Sass when built; future
+website theme changes require a new app build. Publishing still uses Jekyll, so
+features specific to Jekyll, such as Liquid and syntax highlighting, can differ
+from the Markdown preview.
 
 Keyboard shortcuts: **⌘N** new article, **⌘S** save locally, **⌘R** refresh,
 **⇧⌘P** publish. Closing the app waits for pending local saves.

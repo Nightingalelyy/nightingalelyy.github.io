@@ -159,6 +159,8 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
+        // A script-free srcdoc preview inherits the bundled editor's origin.
+        if url.absoluteString.split(separator: "#", maxSplits: 1).first == "about:srcdoc", navigationAction.targetFrame?.isMainFrame == false { decisionHandler(.allow); return }
         if url.isFileURL, url.standardizedFileURL.path.hasPrefix(webRoot.path + "/") { decisionHandler(.allow); return }
         if navigationAction.navigationType == .linkActivated, ["https", "http"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
         decisionHandler(.cancel)

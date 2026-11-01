@@ -38,13 +38,16 @@ document.querySelectorAll('[data-icon]').forEach((node) => { node.innerHTML = ic
 
 const editable = new Compartment();
 const state = {
-  articles: [], categories: [], active: null, parsed: null, initialFields: {}, savedRaw: '', filter: 'all', query: '', view: 'write',
+  articles: [], categories: [], active: null, parsed: null, initialFields: {}, savedRaw: '', filter: 'all', query: '', view: 'write', previewDevice: 'desktop',
   status: {}, busy: false, publishing: false, transitioning: false, editVersion: 0, selectionVersion: 0, ready: false,
 };
 let editor;
 let autosaveTimer;
 let previewTimer;
 let previewVersion = 0;
+let previewArticlePath = null;
+let previewRestoreScroll = null;
+const previewScrollPositions = new Map();
 let saveChain = Promise.resolve();
 let toastTimer;
 const assetCache = new Map();
@@ -294,40 +297,103 @@ async function saveCurrent() {
   return next;
 }
 function setView(view) {
+  const previousView = state.view;
+  if (previousView !== 'write') capturePreviewScroll();
   state.view = view;
   $('#writing-area').className = `writing-area view-${view}`;
+  $('#document').classList.toggle('mode-preview', view === 'preview');
+  $('#preview-options').hidden = view === 'write';
   document.querySelectorAll('[data-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.view === view);
     button.setAttribute('aria-pressed', String(button.dataset.view === view));
   });
-  if (view !== 'write') renderPreview();
+  if (view !== 'write') {
+    if (previousView === 'write') previewRestoreScroll = previewScrollPositions.get(`${state.active?.path}:${state.previewDevice}`) ?? 0;
+    renderPreview();
+  }
   editor?.requestMeasure();
 }
+function setPreviewDevice(device) {
+  if (!['desktop', 'mobile'].includes(device)) return;
+  capturePreviewScroll();
+  state.previewDevice = device;
+  $('#preview-canvas').dataset.device = device;
+  $('#preview-size-label').textContent = device === 'desktop' ? 'Desktop · 800 px article' : 'Mobile · 390 px page';
+  document.querySelectorAll('[data-preview-device]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.previewDevice === device);
+    button.setAttribute('aria-pressed', String(button.dataset.previewDevice === device));
+  });
+  $('#preview-scroll').scrollLeft = 0;
+  previewRestoreScroll = previewScrollPositions.get(`${state.active?.path}:${device}`) ?? 0;
+  renderPreview();
+}
+function previewDocument() {
+  try {
+    const doc = $('#site-preview-frame').contentDocument;
+    return doc?.getElementById('site-preview-content') ? doc : null;
+  } catch { return null; }
+}
+function capturePreviewScroll() {
+  const doc = previewDocument();
+  if (state.view !== 'write' && doc && previewArticlePath) {
+    previewScrollPositions.set(`${previewArticlePath}:${state.previewDevice}`, (doc.scrollingElement || doc.documentElement).scrollTop);
+  }
+}
+function liveArticleURL(path) {
+  if (path === 'index.md') return 'https://nightingalelyy.github.io/';
+  if (path === '404.md') return 'https://nightingalelyy.github.io/404.html';
+  const route = path.replace(/^_docs\//, '').replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
+  return `https://nightingalelyy.github.io/${route}/`;
+}
+function safePreviewLink(href, path) {
+  try {
+    const url = new URL(href, liveArticleURL(path));
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
+}
 async function renderPreview() {
-  if (!editor) return;
+  if (!editor || !state.active || state.view === 'write') return;
+  const doc = previewDocument();
+  if (!doc) return;
   const version = ++previewVersion;
+  const articlePath = state.active.path;
+  const scroller = doc.scrollingElement || doc.documentElement;
+  const scrollTop = previewRestoreScroll ?? (previewArticlePath === articlePath ? scroller.scrollTop : 0);
+  previewRestoreScroll = null;
+  previewArticlePath = articlePath;
+  const configuredTitle = doc.querySelector('meta[name="site-title"]')?.content;
+  const siteTitle = configuredTitle && configuredTitle !== '__NIGHTINGALE_SITE_TITLE__' ? configuredTitle : "Yuyang Liu's Blog";
+  doc.getElementById('site-preview-category').textContent = (articlePath.startsWith('_docs/') ? $('#category-input').value : state.parsed?.meta.category) || siteTitle;
+  doc.getElementById('site-preview-title').textContent = $('#title-input').value;
+  doc.title = `${$('#title-input').value || siteTitle} — Website preview`;
+  const content = doc.getElementById('site-preview-content');
   const unsafe = renderMarkdown(editor.state.doc.toString());
-  $('#preview').innerHTML = DOMPurify.sanitize(unsafe, {
+  content.innerHTML = DOMPurify.sanitize(unsafe, {
     FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base'],
     FORBID_ATTR: ['style', 'srcset'],
   });
-  $('#preview').querySelectorAll('a').forEach((link) => {
+  content.querySelectorAll('a').forEach((link) => {
     const href = link.getAttribute('href') || '';
-    if (/^(javascript|data|file):/i.test(href)) link.removeAttribute('href');
-    else if (href.startsWith('/')) link.href = `https://nightingalelyy.github.io${href}`;
+    if (!href.startsWith('#')) {
+      const url = safePreviewLink(href, articlePath);
+      if (url) link.href = url; else link.removeAttribute('href');
+    }
     link.setAttribute('rel', 'noopener noreferrer');
-    link.setAttribute('target', '_blank');
+    link.setAttribute('target', '_self');
   });
-  const images = [...$('#preview').querySelectorAll('img')];
+  scroller.scrollTop = scrollTop;
+  const restoredTop = scroller.scrollTop;
+  const images = [...content.querySelectorAll('img')];
   await Promise.all(images.map(async (image) => {
     const source = image.getAttribute('src') || '';
     image.addEventListener('error', () => { image.classList.add('unavailable'); image.title = 'This image is unavailable. External images need an internet connection.'; }, { once: true });
     if (/^https:\/\//i.test(source) || /^data:image\//i.test(source)) return;
     if (/^[a-z]+:/i.test(source) || source.startsWith('//')) { image.removeAttribute('src'); image.classList.add('unavailable'); return; }
+    image.removeAttribute('src');
     try {
       let path = decodeURIComponent(source.split(/[?#]/)[0]).replace(/^\.\//, '');
       if (!path.startsWith('/')) {
-        if (!path.startsWith('images/')) path = `${state.active.path.slice(0, state.active.path.lastIndexOf('/') + 1)}${path}`;
+        if (!path.startsWith('images/')) path = `${articlePath.slice(0, articlePath.lastIndexOf('/') + 1)}${path}`;
         path = `/${path}`;
       }
       let dataURL = assetCache.get(path);
@@ -337,11 +403,12 @@ async function renderPreview() {
         dataURL = `data:${asset.mime};base64,${asset.base64}`;
         assetCache.set(path, dataURL);
       }
-      if (version === previewVersion && image.isConnected) image.src = dataURL;
+      if (version === previewVersion && image.isConnected) { image.src = dataURL; image.classList.remove('unavailable'); }
     } catch {
       image.removeAttribute('src'); image.classList.add('unavailable'); image.alt ||= 'Image unavailable offline';
     }
   }));
+  if (version === previewVersion && Math.abs(scroller.scrollTop - restoredTop) < 2) scroller.scrollTop = scrollTop;
 }
 async function runSync({ publish = false, quiet = false } = {}) {
   if (state.busy || state.transitioning || !state.ready || document.querySelector('dialog[open]')) return;
@@ -564,6 +631,8 @@ $('#image-button').addEventListener('click', addImage);
 $('#retry-button').addEventListener('click', bootstrap);
 $('#details-button').addEventListener('click', () => { const visible = $('#extra-metadata').hidden; $('#extra-metadata').hidden = !visible; $('#details-button').setAttribute('aria-expanded', String(visible)); });
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => setView(button.dataset.view)));
+document.querySelectorAll('[data-preview-device]').forEach((button) => button.addEventListener('click', () => setPreviewDevice(button.dataset.previewDevice)));
+$('#site-preview-frame').addEventListener('load', () => { previewArticlePath = null; renderPreview(); });
 document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => $(`#${button.dataset.close}`).close()));
 $('#review-conflict-button').addEventListener('click', reviewConflict);
 $('#keep-local-button').addEventListener('click', () => { $('#conflict-resolved').value = $('#conflict-local').value; });
