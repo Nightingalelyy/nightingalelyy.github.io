@@ -21,6 +21,7 @@ Dir.mktmpdir('nightingale-publishing-fixtures-') do |temporary|
   FileUtils.mkdir_p(File.join(source, '_layouts'))
   File.write(File.join(source, '_config.yml'), <<~YAML)
     url: https://nightingalelyy.github.io
+    timezone: Etc/UTC
     permalink: pretty
     markdown: kramdown
     kramdown:
@@ -44,7 +45,7 @@ Dir.mktmpdir('nightingale-publishing-fixtures-') do |temporary|
     ---
     title: Fixture
     category: Notes
-    date: 2026-11-02
+    date: 2020-01-02
     ---
     First line.
     Second line.
@@ -86,7 +87,7 @@ Dir.mktmpdir('nightingale-publishing-fixtures-') do |temporary|
     'liquid' => [raw.sub('m{ {0,-1} }', 'm{{0,-1}}'), 'liquid.unprotected'],
     'image' => [raw + "\n![Missing](/images/uploads/missing.png)\n", 'image.missing'],
     'link' => [raw + "\n[Missing](/missing/)\n", 'link.missing'],
-    'metadata' => [raw.sub('2026-11-02', '2026-02-30'), 'metadata.date']
+    'metadata' => [raw.sub('2020-01-02', '2026-02-30'), 'metadata.date']
   }.each do |name, (content, code)|
     File.write(article_path, content)
     destination, output, status = run.call(name)
@@ -99,6 +100,28 @@ Dir.mktmpdir('nightingale-publishing-fixtures-') do |temporary|
   destination, output, status = run.call('template-corruption')
   assert.call(!status.success? && output.include?('build.code_changed'), "Rendered code corruption was not blocked: #{output}")
   assert.call(!File.exist?(File.join(destination, 'publication-manifest.json')), 'Corrupt output generated a publication manifest')
+
+  # At 02:14 in China it is still the previous calendar day in UTC. A date-only
+  # frontmatter value must be interpreted in the site's authoring timezone.
+  File.write(layout_path, '<html><body><article class="content">{{ content }}</article></body></html>')
+  boundary_raw = raw.sub('2020-01-02', '2026-11-02')
+  File.write(article_path, boundary_raw)
+  config_path = File.join(source, '_config.yml')
+  boundary_config = File.read(config_path) + "\ntime: '2026-11-01T18:14:00Z'\n"
+  File.write(config_path, boundary_config)
+  destination, output, status = run.call('utc-date-boundary')
+  assert.call(!status.success? && output.include?('build.missing'), "UTC boundary did not reproduce future filtering: #{output}")
+  assert.call(!File.exist?(File.join(destination, 'publication-manifest.json')), 'Hidden future article produced a success manifest')
+
+  File.write(config_path, boundary_config.sub('timezone: Etc/UTC', 'timezone: Asia/Shanghai'))
+  destination, output, status = run.call('shanghai-date-boundary')
+  assert.call(status.success?, "An article dated today in China was hidden: #{output}")
+  manifest = JSON.parse(File.read(File.join(destination, 'publication-manifest.json')))
+  assert.call(manifest['articles'][path]['sha256'] == Digest::SHA256.hexdigest(boundary_raw), 'Boundary publication did not identify exact source')
+
+  File.write(article_path, boundary_raw.sub('2026-11-02', '2026-11-03'))
+  destination, output, status = run.call('genuine-future-date')
+  assert.call(!status.success? && output.include?('build.missing'), "A genuine future date unexpectedly published: #{output}")
 end
 
 puts "Publishing build fixtures passed: #{checks} checks."
