@@ -1,6 +1,6 @@
 {
   "name": "nightingale-writer",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "Offline macOS editor for Yuyang Liu's personal site",

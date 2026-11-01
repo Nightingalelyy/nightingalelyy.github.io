@@ -79,6 +79,22 @@ private struct WriterTemplate: Codable {
     var importedFromID: String? = nil
 }
 
+private struct WriterPrivateSyncConflict: Codable {
+    var base: WriterDraft?
+    var remote: WriterDraft
+    var remoteRevision: String
+}
+
+private struct WriterPrivateSync: Codable {
+    var enabled = false
+    var repository: String?
+    var status = "disabled"
+    var message = "Private draft sync is disconnected. Writing and website publishing still work normally."
+    var lastSyncedAt: String?
+    var bases: [String: WriterDraft] = [:]
+    var conflicts: [String: WriterPrivateSyncConflict] = [:]
+}
+
 private struct WriterState: Codable {
     var version = 1
     var drafts: [String: WriterDraft] = [:]
@@ -91,6 +107,7 @@ private struct WriterState: Codable {
     var localRemovals: [String: WriterLocalRemoval]?
     var deletions: [String: WriterDeletion]?
     var deletionIntents: [String: WriterDeletionIntent]?
+    var privateSync: WriterPrivateSync?
     var state = "ready"
     var message = "Ready to write offline."
     var lastSyncedAt: String?
@@ -118,6 +135,7 @@ final class RepositoryStore {
     private let seedRepo: URL?
     private let identity: (name: String, email: String)?
     private let validation: (([String: Any]) throws -> [String: Any])?
+    private let draftTransport: PrivateDraftTransport
     private let fm = FileManager.default
     private var state = WriterState()
     private var durableState = WriterState()
@@ -138,12 +156,13 @@ final class RepositoryStore {
 
     init(root: URL, remoteURL: String = RepositoryStore.productionRemote,
          seedRepo: URL? = nil, identity: (name: String, email: String)? = nil,
-         validation: (([String: Any]) throws -> [String: Any])? = nil) {
+         validation: (([String: Any]) throws -> [String: Any])? = nil, draftTransport: PrivateDraftTransport? = nil) {
         self.root = root.standardizedFileURL
         self.remoteURL = remoteURL
         self.seedRepo = seedRepo
         self.identity = identity
         self.validation = validation
+        self.draftTransport = draftTransport ?? PrivateDraftGitHubTransport(root: root.appendingPathComponent("private-sync-cache", isDirectory: true))
     }
 
     private var repository: URL { root.appendingPathComponent("repository.git", isDirectory: true) }
@@ -156,11 +175,22 @@ final class RepositoryStore {
 
     func handle(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
         try initialize()
-        if needsRestore && !["bootstrap", "status", "listArticles", "readArticle", "listHistory", "readHistory", "readAsset", "listTemplates"].contains(method) {
+        if needsRestore && !["bootstrap", "status", "listArticles", "readArticle", "listHistory", "readHistory", "readAsset", "listTemplates", "privateSyncStatus"].contains(method) {
             throw fail("Local draft storage needs recovery. Restore a valid backup before editing or publishing.")
         }
         switch method {
-        case "bootstrap", "status", "listArticles": return try bootstrap()
+        case "bootstrap", "status", "listArticles", "privateSyncStatus": return try bootstrap()
+        case "configurePrivateSync": return try configurePrivateSync(params)
+        case "syncPrivateDrafts": return try syncPrivateDrafts()
+        case "resolvePrivateSyncConflict": return try resolvePrivateSyncConflict(params)
+        case "disconnectPrivateSync":
+            if var sync = state.privateSync {
+                sync.enabled = false
+                sync.status = sync.conflicts.isEmpty ? "disabled" : "conflict"
+                sync.message = "Private draft sync disconnected. Local drafts, shared copies, and unresolved versions are preserved."
+                state.privateSync = sync; try persist()
+            }
+            return try bootstrap()
         case "removeLocally": return try removeLocally(params)
         case "restoreLocalRemoval": return try restoreLocalRemoval(params)
         case "prepareDeletion": return try prepareDeletion(params)
@@ -260,7 +290,7 @@ final class RepositoryStore {
             try validateArticlePath(path)
             guard state.deletionIntents?[path] == nil, state.localRemovals?[path] == nil else { throw fail("Restore the locally removed item and settle any deletion status before publishing.") }
             guard let draft = state.drafts[path] else { throw fail("There are no local changes to publish for this article.") }
-            guard state.conflicts[path] == nil else { throw fail("Resolve the conflicting edits before publishing this article.") }
+            guard state.conflicts[path] == nil, state.privateSync?.conflicts[path] == nil else { throw fail("Resolve website and private draft conflicts before publishing this article.") }
             if let expected = params["expectedRevision"] as? String, expected != digest(draft.rawContent) { throw fail("The article changed. Save and validate the current version before publishing.") }
             try requireValidPublication(path: path, raw: draft.rawContent)
             try archiveContent(path: path, content: draft.rawContent, reason: "queued")
@@ -656,6 +686,416 @@ final class RepositoryStore {
         state.deletions?[path] = record; pruneDeletionRecords()
     }
 
+    private let maxPrivateSyncBytes = 64 * 1024 * 1024
+
+    private func privateDraftIdentity(_ draft: WriterDraft) throws -> String {
+        let object: [String: Any] = ["rawContent": draft.rawContent, "baseBlob": draft.baseBlob as Any? ?? NSNull(), "baseContent": draft.baseContent as Any? ?? NSNull()]
+        return SHA256.hash(data: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func privateSyncJSON() -> [String: Any] {
+        let sync = state.privateSync ?? WriterPrivateSync()
+        let conflicts: [[String: Any]] = sync.conflicts.keys.sorted().compactMap { path in
+            guard let conflict = sync.conflicts[path] else { return nil }
+            let local = state.drafts[path]
+            return ["path": path, "local": local?.rawContent as Any? ?? NSNull(), "remote": conflict.remote.rawContent,
+                    "base": conflict.base?.rawContent as Any? ?? NSNull(), "localRevision": local.map { digest($0.rawContent) } ?? "",
+                    "remoteRevision": conflict.remoteRevision]
+        }
+        var result: [String: Any] = ["enabled": sync.enabled, "state": sync.status, "message": sync.message,
+                                   "conflicts": conflicts, "draftCount": state.drafts.count]
+        if sync.enabled && sync.status == "synced", state.drafts.contains(where: { path, draft in
+            guard let base = sync.bases[path] else { return true }
+            return (try? privateDraftIdentity(draft)) != (try? privateDraftIdentity(base))
+        }) {
+            result["state"] = "ready"; result["message"] = "Local draft edits are waiting for private sync. Website publishing is separate."
+        }
+        if let repository = sync.repository { result["repository"] = repository }
+        if let time = sync.lastSyncedAt { result["lastSyncedAt"] = time }
+        return result
+    }
+
+    private func configurePrivateSync(_ params: [String: Any]) throws -> [String: Any] {
+        guard params["confirmation"] as? String == "CONNECT" else { throw fail("Confirm connecting to the private draft repository first.") }
+        let repository = try PrivateDraftGitHubTransport.canonicalRepository(string(params, "repository"))
+        var sync = state.privateSync ?? WriterPrivateSync()
+        if sync.repository?.lowercased() != repository.lowercased() {
+            guard sync.conflicts.isEmpty else { throw fail("Resolve private draft conflicts before connecting a different repository.") }
+            sync = WriterPrivateSync()
+        }
+        try draftTransport.verify(repository: repository)
+        sync.enabled = true; sync.repository = repository
+        sync.status = sync.conflicts.isEmpty ? "ready" : "conflict"
+        sync.message = "Connected to private draft storage. Choose Sync drafts to transfer local work. Website publishing is separate."
+        state.privateSync = sync
+        try persist(); return try bootstrap()
+    }
+
+    // Internal for isolated parser tests. It never initializes storage or uses the network.
+    func privateAssetPaths(_ raw: String) throws -> [String] {
+        var units = Array(raw.utf16)
+        var remainingWork = units.count * 8 + 1024
+        func spendWork() throws {
+            remainingWork -= 1
+            guard remainingWork >= 0 else { throw fail("Draft image references are too complex to scan safely. Simplify unmatched brackets or backticks before syncing.") }
+        }
+        func text() -> String { String(decoding: units, as: UTF16.self) }
+        func matches(_ pattern: String, in source: String) throws -> [NSTextCheckingResult] {
+            try NSRegularExpression(pattern: pattern).matches(in: source, range: NSRange(location: 0, length: (source as NSString).length))
+        }
+        func mask(_ range: NSRange) {
+            for index in range.location..<min(units.count, NSMaxRange(range)) where units[index] != 10 && units[index] != 13 { units[index] = 32 }
+        }
+        if let header = try matches(#"\A---\r?\n[\s\S]*?\r?\n---(?:\r?\n|\z)"#, in: raw).first { mask(header.range) }
+        // Code is data, not a request to upload the image paths shown in examples.
+        var fence: (character: Character, length: Int)?
+        var lineOffset = 0
+        var listIndent: Int?
+        for originalLine in text().components(separatedBy: "\n") {
+            let range = NSRange(location: lineOffset, length: originalLine.utf16.count)
+            lineOffset += range.length + 1
+            let line = originalLine.replacingOccurrences(of: #"^ {0,3}(?:>[ \t]?)+"#, with: "", options: .regularExpression)
+            let leading = line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let open = fence {
+                mask(range)
+                let run = trimmed.prefix { $0 == open.character }
+                if run.count >= open.length && trimmed.dropFirst(run.count).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fence = nil }
+                continue
+            }
+            if let marker = try matches(#"^ {0,3}(?:[-+*]|[0-9]+[.)])[ \t]+"#, in: line).first { listIndent = marker.range.length }
+            else if !trimmed.isEmpty, let indent = listIndent, leading < indent { listIndent = nil }
+            if leading >= (listIndent.map { $0 + 4 } ?? 4) { mask(range); continue }
+            let possible = line.replacingOccurrences(of: #"^ {0,3}(?:[-+*]|[0-9]+[.)])[ \t]+"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+            if let character = possible.first, character == "`" || character == "~" {
+                let run = possible.prefix { $0 == character }
+                if run.count >= 3 && !(character == "`" && possible.dropFirst(run.count).contains("`")) { fence = (character, run.count); mask(range) }
+            }
+        }
+        for match in try matches(#"(?is)<!--[\s\S]*?(?:-->|\z)|<(pre|code|script|style|textarea)\b[^>]*>[\s\S]*?(?:</\1\s*>|\z)"#, in: text()) { mask(match.range) }
+        func escaped(_ position: Int, in input: [UInt16]) -> Bool {
+            var cursor = position, count = 0
+            while cursor > 0 && input[cursor - 1] == 92 { cursor -= 1; count += 1 }
+            return count % 2 == 1
+        }
+        var cursor = 0
+        while cursor < units.count {
+            guard units[cursor] == 96 && !escaped(cursor, in: units) else { cursor += 1; continue }
+            let start = cursor
+            while cursor < units.count && units[cursor] == 96 { cursor += 1 }
+            let length = cursor - start
+            var closing = cursor
+            while closing < units.count {
+                try spendWork()
+                if units[closing] != 96 { closing += 1; continue }
+                let beginning = closing
+                while closing < units.count && units[closing] == 96 { try spendWork(); closing += 1 }
+                if closing - beginning == length { mask(NSRange(location: start, length: closing - start)); cursor = closing; break }
+            }
+        }
+        func unescape(_ value: String) -> String {
+            value.replacingOccurrences(of: ##"\\([!\"#$%&'()*+,\-./:;<=>?@\[\]\\^_`{|}~])"##, with: "$1", options: .regularExpression)
+        }
+        func label(_ value: String) -> String {
+            unescape(value).precomposedStringWithCanonicalMapping.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let definitionsSource = text() as NSString
+        var definitions: [String: String] = [:]
+        for definition in try matches(#"(?m)^ {0,3}\[([^\]\r\n]+)\]:[ \t]*(?:\r?\n[ \t]{0,3})?(?:<([^>\r\n]+)>|((?:\\.|[^\s])+))[^\r\n]*"#, in: definitionsSource as String) {
+            let key = label(definitionsSource.substring(with: definition.range(at: 1)))
+            let destination = definition.range(at: 2).location == NSNotFound ? definition.range(at: 3) : definition.range(at: 2)
+            if definitions[key] == nil { definitions[key] = definitionsSource.substring(with: destination) }
+            mask(definition.range)
+        }
+        let markdown = units
+        var urls: [String] = []
+        func string(_ start: Int, _ end: Int) -> String { String(decoding: markdown[start..<end], as: UTF16.self) }
+        func bracketEnd(_ start: Int) throws -> Int? {
+            var depth = 1, index = start + 1
+            while index < markdown.count {
+                try spendWork()
+                if markdown[index] == 92 { index += 2; continue }
+                if markdown[index] == 91 { depth += 1 }
+                if markdown[index] == 93 { depth -= 1; if depth == 0 { return index } }
+                index += 1
+            }
+            return nil
+        }
+        func whitespace(_ value: UInt16) -> Bool { [9, 10, 13, 32].contains(value) }
+        func inlineDestination(_ opening: Int) throws -> (String, Int)? {
+            var index = opening + 1
+            while index < markdown.count && whitespace(markdown[index]) { try spendWork(); index += 1 }
+            let destination: String
+            if index < markdown.count && markdown[index] == 60 {
+                let start = index + 1; index += 1
+                while index < markdown.count && markdown[index] != 62 && markdown[index] != 10 && markdown[index] != 13 { try spendWork(); index += markdown[index] == 92 ? 2 : 1 }
+                guard index < markdown.count && markdown[index] == 62 else { return nil }
+                destination = string(start, index); index += 1
+            } else {
+                let start = index
+                var depth = 0
+                while index < markdown.count {
+                    try spendWork()
+                    let character = markdown[index]
+                    if character == 92 { index += 2; continue }
+                    if character == 40 { depth += 1 }
+                    if character == 41 { if depth == 0 { break }; depth -= 1 }
+                    if whitespace(character) { break }
+                    index += 1
+                }
+                guard index <= markdown.count, depth == 0 else { return nil }
+                destination = string(start, index)
+            }
+            while index < markdown.count && whitespace(markdown[index]) { try spendWork(); index += 1 }
+            if index < markdown.count && [34, 39, 40].contains(markdown[index]) {
+                let closing: UInt16 = markdown[index] == 40 ? 41 : markdown[index]; index += 1
+                while index < markdown.count && markdown[index] != closing { try spendWork(); index += markdown[index] == 92 ? 2 : 1 }
+                guard index < markdown.count else { return nil }; index += 1
+                while index < markdown.count && whitespace(markdown[index]) { try spendWork(); index += 1 }
+            }
+            guard index < markdown.count && markdown[index] == 41 else { return nil }
+            return (destination, index + 1)
+        }
+        cursor = 0
+        while cursor + 1 < markdown.count {
+            guard markdown[cursor] == 33, markdown[cursor + 1] == 91, !escaped(cursor, in: markdown), let end = try bracketEnd(cursor + 1) else { cursor += 1; continue }
+            let alt = string(cursor + 2, end)
+            var finish = end + 1
+            var destination: String?
+            if finish < markdown.count && markdown[finish] == 40, let parsed = try inlineDestination(finish) { destination = parsed.0; finish = parsed.1 }
+            else if finish < markdown.count && markdown[finish] == 91, let referenceEnd = try bracketEnd(finish) {
+                let reference = string(finish + 1, referenceEnd)
+                destination = definitions[label(reference.isEmpty ? alt : reference)]; finish = referenceEnd + 1
+            } else { destination = definitions[label(alt)] }
+            if let destination { urls.append(unescape(destination)); mask(NSRange(location: cursor, length: finish - cursor)) }
+            cursor = finish
+        }
+        let html = text() as NSString
+        for tag in try matches(#"(?is)<img\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>"#, in: html as String) {
+            guard !escaped(tag.range.location, in: units) else { continue }
+            let markup = html.substring(with: tag.range) as NSString
+            if let source = try matches(#"(?is)\ssrc\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))"#, in: markup as String).first {
+                let range = (1...3).map { source.range(at: $0) }.first { $0.location != NSNotFound }!
+                urls.append(markup.substring(with: range))
+            }
+        }
+        var paths = Set<String>()
+        for supplied in urls {
+            var url = supplied.trimmingCharacters(in: .whitespacesAndNewlines)
+            for (entity, value) in [("&quot;", "\""), ("&#39;", "'"), ("&apos;", "'"), ("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&")] { url = url.replacingOccurrences(of: entity, with: value) }
+            if url.hasPrefix("//") || url.range(of: #"^[a-zA-Z][a-zA-Z0-9+.-]*:"#, options: .regularExpression) != nil {
+                guard let absolute = URLComponents(string: url.hasPrefix("//") ? "https:" + url : url),
+                      ["http", "https"].contains(absolute.scheme?.lowercased() ?? ""),
+                      absolute.host?.lowercased() == "nightingalelyy.github.io", absolute.user == nil, absolute.password == nil,
+                      absolute.port == nil || absolute.port == (absolute.scheme?.lowercased() == "https" ? 443 : 80) else { continue }
+                url = absolute.percentEncodedPath
+            }
+            while url.hasPrefix("./") { url.removeFirst(2) }
+            if url.hasPrefix("/") { url.removeFirst() }
+            guard url.hasPrefix("images/uploads/") else { continue }
+            url = String(url.prefix { $0 != "?" && $0 != "#" })
+            guard let path = url.removingPercentEncoding else { throw fail("A draft image path has invalid URL encoding.") }
+            try validateRelative(path); paths.insert(path)
+        }
+        return paths.sorted()
+    }
+
+    private func validatePrivateImage(path: String, data: Data) throws {
+        try validateRelative(path)
+        guard path.hasPrefix("images/uploads/"), !data.isEmpty, data.count <= 20 * 1024 * 1024,
+              imageMIME((path as NSString).pathExtension) != nil else { throw fail("Private draft images must be supported raster files below 20 MB.") }
+        let ext = (path as NSString).pathExtension.lowercased(), head = Array(data.prefix(12))
+        let valid = (ext == "png" && head.starts(with: [137, 80, 78, 71, 13, 10, 26, 10])) ||
+            (["jpg", "jpeg"].contains(ext) && head.starts(with: [255, 216, 255])) ||
+            (ext == "gif" && (data.prefix(6) == Data("GIF87a".utf8) || data.prefix(6) == Data("GIF89a".utf8))) ||
+            (ext == "webp" && String(data: data.prefix(4), encoding: .ascii) == "RIFF" && String(data: data.dropFirst(8).prefix(4), encoding: .ascii) == "WEBP")
+        guard valid else { throw fail("A private draft image does not match its file type.") }
+    }
+
+    private func validatePrivateDraft(_ draft: WriterDraft, path: String) throws {
+        try validateArticlePath(path); try validateArticleContent(draft.rawContent)
+        if let base = draft.baseContent { try validateArticleContent(base) }
+        guard draft.baseBlob == nil || draft.baseBlob?.range(of: "^[0-9a-f]{40,64}$", options: .regularExpression) != nil,
+              (draft.baseBlob == nil) == (draft.baseContent == nil), draft.updatedAt.utf8.count <= 100 else { throw fail("A private draft has invalid publication base metadata.") }
+    }
+
+    private func decodePrivatePayload(_ data: Data?) throws -> (drafts: [String: WriterDraft], assets: [String: Data]) {
+        guard let data else { return ([:], [:]) }
+        guard data.count <= maxPrivateSyncBytes, let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(payload.keys) == Set(["format", "formatVersion", "publicationRepository", "drafts", "assets"]),
+              payload["format"] as? String == "nightingale-private-drafts", payload["formatVersion"] as? Int == 1,
+              payload["publicationRepository"] as? String == remoteURL, let draftObjects = payload["drafts"] as? [String: Any], draftObjects.count <= 1000,
+              let imageObjects = payload["assets"] as? [[String: Any]], imageObjects.count <= 1000 else {
+            throw fail("The private draft snapshot is invalid, belongs to another website, or exceeds 64 MB.")
+        }
+        var drafts: [String: WriterDraft] = [:], names = Set<String>()
+        for (path, object) in draftObjects {
+            guard let fields = object as? [String: Any], Set(fields.keys).isSubset(of: Set(["rawContent", "baseBlob", "baseContent", "updatedAt"])) else { throw fail("A private draft contains unsupported fields.") }
+            let draft = try JSONDecoder().decode(WriterDraft.self, from: JSONSerialization.data(withJSONObject: fields))
+            try validatePrivateDraft(draft, path: path)
+            let normalized = path.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            guard names.insert(normalized).inserted else { throw fail("Private draft filenames collide on this Mac.") }
+            let localPaths = Set(state.drafts.keys).union(articles.keys).union(state.localRemovals?.keys.map { $0 } ?? [])
+            guard !localPaths.contains(where: { !$0.utf8.elementsEqual(path.utf8) && $0.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) == normalized }) else {
+                throw fail("An incoming private draft filename conflicts with an existing local filename. Nothing was imported.")
+            }
+            drafts[path] = draft
+        }
+        var assets: [String: Data] = [:]; names.removeAll()
+        for object in imageObjects {
+            guard Set(object.keys) == Set(["path", "base64", "sha256"]), let path = object["path"] as? String,
+                  let base64 = object["base64"] as? String, let data = Data(base64Encoded: base64),
+                  object["sha256"] as? String == SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() else { throw fail("A private draft image failed its integrity check.") }
+            try validatePrivateImage(path: path, data: data)
+            let normalized = path.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            guard names.insert(normalized).inserted else { throw fail("Private image filenames collide on this Mac.") }
+            if fm.fileExists(atPath: assetsRoot.appendingPathComponent(path).path) {
+                guard try Data(contentsOf: safeExisting(path, inside: assetsRoot)) == data else { throw fail("A private image conflicts with an existing image. Both versions are preserved; nothing was imported.") }
+            }
+            assets[path] = data
+        }
+        for draft in drafts.values {
+            for path in try privateAssetPaths(draft.rawContent) where assets[path] == nil {
+                // Already-published uploads may be supplied by the site's cached Git tree.
+                guard (try? readAsset(path: path)) != nil else { throw fail("A private draft is missing its image: \(path)") }
+            }
+        }
+        return (drafts, assets)
+    }
+
+    private func privatePayload(drafts: [String: WriterDraft], remoteAssets: [String: Data]) throws -> (data: Data, assets: [String: Data]) {
+        guard drafts.count <= 1000 else { throw fail("Private draft sync supports up to 1000 retained drafts.") }
+        var assets = remoteAssets
+        var articleNames = Set<String>()
+        for (path, draft) in drafts {
+            try validatePrivateDraft(draft, path: path)
+            let normalized = path.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            guard articleNames.insert(normalized).inserted else { throw fail("Private draft filenames collide on this Mac.") }
+            for imagePath in try privateAssetPaths(draft.rawContent) {
+                if fm.fileExists(atPath: assetsRoot.appendingPathComponent(imagePath).path) {
+                    let data = try Data(contentsOf: safeExisting(imagePath, inside: assetsRoot))
+                    try validatePrivateImage(path: imagePath, data: data)
+                    if let remote = assets[imagePath], remote != data { throw fail("A private image conflicts with this Mac's image. Nothing was overwritten.") }
+                    assets[imagePath] = data
+                } else if assets[imagePath] == nil {
+                    let image = try readAsset(path: imagePath)
+                    guard let encoded = image["base64"] as? String, let data = Data(base64Encoded: encoded) else { throw fail("A draft image could not be read.") }
+                    try validatePrivateImage(path: imagePath, data: data); assets[imagePath] = data
+                }
+            }
+        }
+        let assetNames = assets.keys.map { $0.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) }
+        guard Set(assetNames).count == assets.count else { throw fail("Private image filenames collide on this Mac.") }
+        guard assets.count <= 1000 else { throw fail("Private draft sync supports up to 1000 retained images.") }
+        let encodedDrafts = try JSONSerialization.jsonObject(with: JSONEncoder().encode(drafts))
+        let images: [[String: Any]] = assets.keys.sorted().map { path in
+            let data = assets[path]!
+            return ["path": path, "base64": data.base64EncodedString(), "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()]
+        }
+        let payload: [String: Any] = ["format": "nightingale-private-drafts", "formatVersion": 1, "publicationRepository": remoteURL,
+                                    "drafts": encodedDrafts, "assets": images]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        guard data.count <= maxPrivateSyncBytes else { throw fail("Private drafts and retained images exceed the 64 MB sync limit. Your local work is unchanged.") }
+        return (data, assets)
+    }
+
+    private func syncPrivateDrafts() throws -> [String: Any] {
+        guard var sync = state.privateSync, sync.enabled, let repository = sync.repository else { throw fail("Connect private draft storage before syncing.") }
+        let previous = state
+        var createdFiles: [URL] = []
+        do {
+            let fetched = try draftTransport.read(repository: repository)
+            let incoming = try decodePrivatePayload(fetched.data)
+            var shared = incoming.drafts, nextDrafts = state.drafts
+            var archives: [(String, String, String)] = []
+            let paths = Set(state.drafts.keys).union(incoming.drafts.keys).union(sync.bases.keys)
+            for path in paths.sorted() {
+                let local = state.drafts[path], remote = incoming.drafts[path], base = sync.bases[path]
+                let protected = state.queue[path] != nil || state.conflicts[path] != nil || state.localRemovals?[path] != nil || state.deletionIntents?[path] != nil
+                guard let remote else {
+                    // Absence is never a deletion instruction. Retain a previously shared copy.
+                    if let retained = local ?? base { shared[path] = retained; sync.bases[path] = retained }
+                    sync.conflicts.removeValue(forKey: path)
+                    continue
+                }
+                let remoteID = try privateDraftIdentity(remote)
+                let localID = try local.map { try privateDraftIdentity($0) }
+                let baseID = try base.map { try privateDraftIdentity($0) }
+                if localID == remoteID {
+                    sync.bases[path] = remote; sync.conflicts.removeValue(forKey: path)
+                } else if baseID == remoteID {
+                    if let local { shared[path] = local; sync.bases[path] = local }
+                    else { sync.bases[path] = remote }
+                    sync.conflicts.removeValue(forKey: path)
+                } else if local == nil && articles[path]?.rawContent == remote.rawContent && !protected {
+                    // Publishing/discarding a synchronized draft must not recreate an identical draft.
+                    sync.bases[path] = remote; sync.conflicts.removeValue(forKey: path)
+                } else if !protected && ((base == nil && local == nil) || (base != nil && localID == baseID)) {
+                    if let local { archives.append((path, local.rawContent, "before-private-sync")) }
+                    nextDrafts[path] = remote; sync.bases[path] = remote; sync.conflicts.removeValue(forKey: path)
+                } else {
+                    if sync.conflicts[path]?.remoteRevision != remoteID { archives.append((path, remote.rawContent, "private-sync-conflict")) }
+                    sync.conflicts[path] = WriterPrivateSyncConflict(base: base, remote: remote, remoteRevision: remoteID)
+                }
+            }
+            let outgoing = try privatePayload(drafts: shared, remoteAssets: incoming.assets)
+            // Complete validation precedes any upload or local mutation. Transport uses an expected-revision CAS write.
+            if outgoing.data != fetched.data {
+                _ = try draftTransport.write(repository: repository, data: outgoing.data, expectedRevision: fetched.revision)
+            }
+            try automaticBackup(force: true)
+            try fm.createDirectory(at: assetsRoot, withIntermediateDirectories: true)
+            for (path, bytes) in outgoing.assets where !fm.fileExists(atPath: assetsRoot.appendingPathComponent(path).path) {
+                let target = try safeDestination(path, inside: assetsRoot)
+                try bytes.write(to: target, options: .atomic); createdFiles.append(target)
+            }
+            for (path, raw, reason) in archives {
+                if let file = try archiveContent(path: path, content: raw, reason: reason) { createdFiles.append(file) }
+            }
+            state.drafts = nextDrafts
+            sync.status = sync.conflicts.isEmpty ? "synced" : "conflict"
+            sync.message = sync.conflicts.isEmpty ? "Private drafts synced. Website publishing is unchanged." : "Private drafts need review. Both versions are preserved; website publishing is blocked for these articles."
+            sync.lastSyncedAt = now(); state.privateSync = sync
+            try persist()
+            do { try automaticBackup(force: true) } catch { backupWarning = "Private drafts synced, but the automatic backup could not be written." }
+            return try bootstrap()
+        } catch {
+            state = previous
+            for file in createdFiles { try? fm.removeItem(at: file) }
+            pendingHistoryPrunes.removeAll()
+            var failed = previous.privateSync ?? WriterPrivateSync()
+            let detail = error.localizedDescription
+            failed.status = ["offline", "network", "connection", "timed out", "resolve host"].contains(where: { detail.lowercased().contains($0) }) ? "offline" : "error"
+            failed.message = "Private draft sync could not finish. This Mac's drafts are unchanged. " + detail
+            state.privateSync = failed
+            try persist(); return try bootstrap()
+        }
+    }
+
+    private func resolvePrivateSyncConflict(_ params: [String: Any]) throws -> [String: Any] {
+        let path = try string(params, "path"); try validateArticlePath(path)
+        guard var sync = state.privateSync, let conflict = sync.conflicts[path] else { throw fail("This private draft conflict is no longer available.") }
+        let local = state.drafts[path]
+        guard params["expectedLocalRevision"] as? String == (local.map { digest($0.rawContent) } ?? ""),
+              params["expectedRemoteRevision"] as? String == conflict.remoteRevision else { throw fail("The conflict changed. Reload both versions before choosing.") }
+        let choice = try string(params, "choice")
+        guard ["local", "remote"].contains(choice) else { throw fail("Choose the local or private remote version.") }
+        if choice == "remote" {
+            guard state.queue[path] == nil, state.conflicts[path] == nil, state.localRemovals?[path] == nil, state.deletionIntents?[path] == nil else {
+                throw fail("Cancel queued publication, resolve website conflicts, and restore locally removed items before using the private remote version.")
+            }
+        }
+        try automaticBackup(force: true)
+        if let local { try archiveContent(path: path, content: local.rawContent, reason: "before-private-resolution") }
+        if choice == "remote" { state.drafts[path] = conflict.remote }
+        // Accepting local absence only acknowledges the shared copy; it never erases it.
+        sync.bases[path] = conflict.remote; sync.conflicts.removeValue(forKey: path)
+        sync.status = sync.conflicts.isEmpty ? (sync.enabled ? "ready" : "disabled") : "conflict"
+        sync.message = "Private draft choice saved on this Mac. Sync drafts again to share it. Website publishing is separate."
+        state.privateSync = sync
+        try persist(); return try bootstrap()
+    }
+
     private func normalizedLabel(_ supplied: String, kind: String) throws -> String {
         guard !supplied.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) else {
             throw fail("\(kind) names cannot contain control characters or line breaks.")
@@ -809,7 +1249,9 @@ final class RepositoryStore {
 
     private func initialize() throws {
         if initialized { return }
-        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        guard (try root.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else { throw fail("Local draft storage cannot be a symbolic link.") }
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
         if fm.fileExists(atPath: stateFile.path) {
             let original = try Data(contentsOf: stateFile)
             do { state = try JSONDecoder().decode(WriterState.self, from: original) }
@@ -848,7 +1290,12 @@ final class RepositoryStore {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let meaningful = try workFingerprint(state) != workFingerprint(durableState)
         do {
-            try encoder.encode(state).write(to: stateFile, options: .atomic)
+            let temporary = root.appendingPathComponent(".state-\(UUID().uuidString).tmp")
+            defer { try? fm.removeItem(at: temporary) }
+            guard fm.createFile(atPath: temporary.path, contents: try encoder.encode(state), attributes: [.posixPermissions: 0o600]) else {
+                throw fail("Could not create private local draft storage.")
+            }
+            guard rename(temporary.path, stateFile.path) == 0 else { throw fail("Could not atomically replace local draft storage.") }
             durableState = state
         } catch {
             state = durableState
@@ -941,7 +1388,8 @@ final class RepositoryStore {
     func exportBackup() throws -> Data {
         try initialize()
         guard !needsRestore else { throw fail("Restore a valid backup before exporting. The original unreadable storage file is preserved.") }
-        let encodedState = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state))
+        var portableState = state; portableState.privateSync = nil
+        let encodedState = try JSONSerialization.jsonObject(with: JSONEncoder().encode(portableState))
         var assets: [[String: Any]] = []
         if let enumerator = fm.enumerator(at: assetsRoot, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]) {
             for case let file as URL in enumerator {
@@ -971,7 +1419,9 @@ final class RepositoryStore {
               payload["repository"] as? String == remoteURL, let stateObject = payload["state"],
               let histories = payload["history"] as? [[String: Any]], histories.count <= 50000,
               let images = payload["assets"] as? [[String: Any]], images.count <= 10000 else { throw fail("Choose a valid Nightingale Writer backup for this repository (up to 256 MB).") }
-        let restored = try JSONDecoder().decode(WriterState.self, from: JSONSerialization.data(withJSONObject: stateObject))
+        guard var portableState = stateObject as? [String: Any] else { throw fail("Invalid backup state.") }
+        portableState.removeValue(forKey: "privateSync")
+        let restored = try JSONDecoder().decode(WriterState.self, from: JSONSerialization.data(withJSONObject: portableState))
         guard restored.version == 1, restored.drafts.count <= 10000, restored.queue.count <= 10000 else { throw fail("This backup version or size is unsupported.") }
         try validateTemplates(restored.templates ?? [:])
         _ = try mergedTemplates(restored.templates ?? [:])
@@ -1274,7 +1724,7 @@ final class RepositoryStore {
         let paths = Set(articles.keys).union(state.drafts.keys).subtracting(state.localRemovals?.keys.map { $0 } ?? []).sorted()
         var result: [String: Any] = ["articles": try paths.map { try articleJSON(path: $0) }, "categories": state.categories ?? [], "templates": templateList(), "status": statusJSON(),
                 "repositoryPath": repository.path, "remoteURL": remoteURL, "branch": "main", "publications": publicationTargets().filter { $0["operation"] as? String != "delete" }, "deletions": deletionRows(includeLocal: true),
-                "recovery": ["needsRestore": needsRestore, "message": needsRestore ? state.message : "", "automaticBackupDirectory": root.appendingPathComponent("backups").path, "historyLimitPerArticle": 100]]
+                "privateSync": privateSyncJSON(), "recovery": ["needsRestore": needsRestore, "message": needsRestore ? state.message : "", "automaticBackupDirectory": root.appendingPathComponent("backups").path, "historyLimitPerArticle": 100]]
         if let warning = backupWarning { result["backupWarning"] = warning }
         return result
     }
@@ -1335,6 +1785,10 @@ final class RepositoryStore {
         var published = 0
         for path in state.queue.keys.sorted() {
             guard let snapshot = state.queue[path] else { continue }
+            if state.privateSync?.conflicts[path] != nil {
+                state.state = "conflict"; state.message = "Resolve the private draft conflict before publishing this article."
+                try persist(); continue
+            }
             let remote = articles[path]
             if remote?.rawContent == snapshot.rawContent {
                 finishPublication(path: path, snapshot: snapshot); published += 1; try persist(); continue
@@ -1363,7 +1817,7 @@ final class RepositoryStore {
                 try persist(); break
             }
         }
-        if !state.conflicts.isEmpty {
+        if !state.conflicts.isEmpty || !(state.privateSync?.conflicts ?? [:]).isEmpty {
             state.state = "conflict"; state.message = "Conflicting edits need review. Both versions are saved."
         } else if state.queue.isEmpty {
             state.state = "synced"; state.message = published > 0 ? "Uploaded to GitHub. Website deployment is awaiting verification." : "Everything is up to date."

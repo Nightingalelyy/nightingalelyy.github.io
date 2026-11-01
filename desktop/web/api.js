@@ -45,4 +45,9 @@ export const api = {
   restoreBackup: (token, expectedStateRevision) => call('restoreBackup', { token, ...(expectedStateRevision != null ? { expectedStateRevision } : {}) }),
   cancelBackupImport: () => call('cancelBackupImport'),
   openExternal: (url) => call('openExternal', { url }),
+  privateSyncStatus: () => call('privateSyncStatus'),
+  configurePrivateSync: (repository) => call('configurePrivateSync', { repository, confirmation: 'CONNECT' }),
+  syncPrivateDrafts: () => call('syncPrivateDrafts'),
+  disconnectPrivateSync: () => call('disconnectPrivateSync'),
+  resolvePrivateSyncConflict: (params) => call('resolvePrivateSyncConflict', params),
 };

@@ -93,6 +93,44 @@ Keyboard shortcuts: **⌘N** new article, **⌘S** save locally, **⌘R** refres
 **⇧⌘P** publish, **⌘F** find in article, **⇧⌘F** search library, **⇧⌘V** paste image.
 Closing the app waits for pending local saves.
 
+## Private draft sync between Macs
+
+Open **Private draft sync** in the sidebar and connect
+`Nightingalelyy/nightingale-writer-drafts`. Connecting verifies access without
+uploading writing. Choose **Sync drafts** to send saved drafts and their local
+images, and download work from another Mac. Use the same repository and GitHub
+CLI account on your other Mac. GitHub CLI must be installed and signed in as
+`Nightingalelyy`; the app never stores a token in draft data or its bundle.
+
+Private draft sync has its own button. **Website sync** retains the existing
+download/publish-queue behavior. **Publish** remains the action that queues an
+article for the public website and makes it available through Pages CMS.
+Private sync never copies publishing queues, deletion actions, credentials,
+history, or app settings to another Mac. It includes the unpublished images
+referenced by the shared drafts.
+
+Sync is manual in this version. Offline editing continues normally; choose
+**Sync drafts** again when connected. If both Macs changed a draft, the panel
+shows both versions and lets you keep this Mac's version or use the other one.
+The displaced version remains in local history. Review and publish separately.
+Publishing is blocked while that article has an unresolved private-sync conflict.
+
+The app verifies that the repository is private, personally owned by you,
+writable, and has no collaborators, invitations, or Pages site before every
+transfer. Drafts use a dedicated `private-drafts` branch. Concurrent uploads
+require the exact previously read revision and retain that revision as their
+parent, so one device cannot overwrite another device's unreviewed work.
+The public website repository is rejected as a draft destination.
+
+The private repository uses GitHub access controls; synced content is not
+end-to-end encrypted. Keep it private. **Disconnect** stops synchronization and
+retains local writing and repository copies. Publishing, discarding, or deleting
+a local draft does not erase its private cloud copy or Git history. Private sync
+is independent of backup export/import; restoring a backup never enables sync.
+Snapshots are limited to 64 MB, with at most 1,000 drafts and 1,000 images,
+5 MB per article and 20 MB per image. Oversized or invalid data is rejected
+without replacing local writing.
+
 ## History and backups
 
 Choose **Delete…** to remove the selected article or editable page. There are two
@@ -195,7 +233,18 @@ test content to the real website.
 
 - `native/Main.swift`: macOS window, menus, image picker, constrained WebKit bridge.
 - `native/RepositoryStore.swift`: local state and Git publication.
+- `native/PrivateDraftGitHubTransport.swift`: verified private-repository transfers.
 - `web/`: CodeMirror editor, frontmatter forms, sanitized Markdown preview.
 - `scripts/build.mjs`: bundle, compile, seed, sign, and archive.
 
 The desktop source directory is excluded from Jekyll output.
+
+## Roadmap
+
+The completed milestones cover publishing checks and deployment status, draft
+recovery and backups, writing tools and content management, public-site
+discovery, and private draft sync between Macs.
+
+Next is maintenance and distribution: versioned Mac releases, safe updates with
+rollback, automated preview-versus-website checks, and measurements for build
+time, media size, and editor/search performance.

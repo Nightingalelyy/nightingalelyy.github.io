@@ -10,6 +10,7 @@ import { renderMarkdownPreview, codeHighlightKey, planCodeHighlights, applyCodeH
 import { publicationView, mergePublicationRecords, validationSummary, issueLocation, compareHistoryVersions, safeExternalURL, workspaceRecovery, deletionReviewView, canConfirmDeletion, deletionView, canRemoveLocally, hasCurrentHistorySource, deletionActions } from './workflow.js';
 import { installWritingTools } from './writing-tools.js';
 import { installManagement } from './management.js';
+import { installPrivateSync } from './private-sync.js';
 
 const $ = (selector) => document.querySelector(selector);
 const icons = {
@@ -38,6 +39,7 @@ const icons = {
 };
 function icon(name) { return `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.page}</svg>`; }
 document.querySelectorAll('[data-icon]').forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+$('#sync-button').lastElementChild.textContent = 'Website sync';
 
 const editable = new Compartment();
 const state = {
@@ -52,6 +54,7 @@ let publicationPollAt = 0;
 let editor;
 let writingTools;
 let management;
+let privateSync;
 let mediaBusy = false;
 let autosaveTimer;
 let previewTimer;
@@ -145,6 +148,7 @@ function applySnapshot(snapshot, { updateDocument = true } = {}) {
       state.active = { ...state.active, isDraft: updated.isDraft, isQueued: updated.isQueued, conflict: updated.conflict, publication: updated.publication };
     }
   }
+  privateSync?.update(snapshot);
   applyWorkspaceAccess(); renderLibrary(); renderStatus(); renderDocumentStatus(); renderDeletions();
 }
 function applyWorkspaceAccess() {
@@ -156,6 +160,7 @@ function applyWorkspaceAccess() {
   document.querySelectorAll('#document input').forEach((input) => { input.disabled = readOnly; });
   editor?.dispatch({ effects: editable.reconfigure([EditorView.editable.of(!readOnly), EditorState.readOnly.of(readOnly)]) });
   writingTools?.refresh();
+  privateSync?.refresh();
   for (const id of ['manage-categories-button', 'templates-button', 'paste-image-button']) $(`#${id}`).disabled = readOnly || state.busy || state.publishing || !state.ready;
 }
 function applyPublicationSnapshot(snapshot) {
@@ -259,7 +264,10 @@ function renderDocumentStatus() {
   $('#document-state').textContent = state.recoveryMode ? 'Read-only' : state.active.conflict ? 'Needs review' : publication.label;
   $('#save-label').textContent = state.recoveryMode ? 'Read-only' : dirty ? 'Save' : 'Saved';
   $('#save-button').disabled = state.recoveryMode || !dirty || state.transitioning;
-  $('#publish-button').disabled = state.recoveryMode || state.busy || state.publishing || state.transitioning || Boolean(state.active.conflict) || (!dirty && !state.active.isDraft);
+  const privateConflict = privateSync?.hasConflict(state.active.path) || false;
+  $('#publish-button').disabled = state.recoveryMode || state.busy || state.publishing || state.transitioning || Boolean(state.active.conflict) || privateConflict || (!dirty && !state.active.isDraft);
+  $('#publish-button').title = privateConflict ? 'Review this draft’s private sync conflict before publishing' : 'Publish this saved version to your website';
+  privateSync?.refresh();
   $('#image-button').disabled = state.recoveryMode || state.transitioning;
   $('#history-button').disabled = state.busy || state.transitioning || state.publishing;
   $('#delete-button').disabled = state.recoveryMode || state.busy || state.transitioning || state.publishing || mediaBusy;
@@ -660,7 +668,7 @@ async function runSync({ publish = false, quiet = false } = {}) {
 }
 async function publishCurrent() {
   if (state.transitioning || mediaBusy) return;
-  if (state.recoveryMode || !state.active || state.busy || state.publishing || state.active.conflict || document.querySelector('dialog[open]')) return;
+  if (state.recoveryMode || !state.active || state.busy || state.publishing || state.active.conflict || privateSync?.hasConflict(state.active.path) || document.querySelector('dialog[open]')) return;
   const path = state.active.path;
   state.publishing = true;
   setTransition(true);
@@ -1428,10 +1436,25 @@ window.addEventListener('online', () => { if (state.articles.some((item) => item
 setInterval(() => { if (state.ready && state.articles.some((item) => item.isQueued && !item.conflict)) runSync({ quiet: true, publish: true }); }, 30000);
 setInterval(() => { void pollPublications(); }, 15000);
 window.writer = {
-  async flushBeforeClose() { if (recovery.busy || removal.busy || mediaBusy || management?.isBusy()) throw new Error('Wait for the current operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
+  async flushBeforeClose() { if (recovery.busy || removal.busy || mediaBusy || management?.isBusy() || privateSync?.isBusy()) throw new Error('Wait for the current operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
   newArticle, saveCurrent, pasteImage, refresh: () => runSync(), publishCurrent, showHistory: () => openHistory(state.active?.path), showAllHistory: () => openHistory(), showBackups: openBackups,
 };
 management = installManagement({ api, getSnapshot: () => ({ articles: state.articles, categories: state.categories, active: state.active }), saveActive: saveCurrent, applySnapshot, selectArticle,
   onError: showError, onToast: showToast, canEdit: () => state.ready && !state.recoveryMode && !state.busy && !state.transitioning && !state.publishing && !mediaBusy });
 management.mountTemplateChooser($('#new-template-chooser'));
+privateSync = installPrivateSync({ api, getSnapshot: () => ({ active: state.active, articles: state.articles }), saveActive: saveCurrent,
+  applySnapshot(snapshot) {
+    const path = state.active?.path;
+    const selection = editor?.state.selection.main;
+    const scrollTop = editor?.scrollDOM.scrollTop;
+    applySnapshot(snapshot);
+    if (selection && editor && state.active?.path === path) {
+      editor.dispatch({ selection: { anchor: Math.min(selection.anchor, editor.state.doc.length), head: Math.min(selection.head, editor.state.doc.length) } });
+      editor.scrollDOM.scrollTop = scrollTop || 0;
+    }
+  },
+  setLocked: setTransition,
+  canUse: () => state.ready && !state.recoveryMode && !state.busy && !state.transitioning && !state.publishing && !mediaBusy && !removal.busy && !management?.isBusy(),
+  onError: showError, onToast: showToast,
+});
 bootstrap();
