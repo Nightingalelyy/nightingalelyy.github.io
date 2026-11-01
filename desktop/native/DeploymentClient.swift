@@ -41,9 +41,20 @@ final class DeploymentClient {
         for target in targets {
             guard let path = target["path"] as? String, let sha = target["sourceSHA256"] as? String else { continue }
             var result: [String: Any] = ["path": path, "sourceSHA256": sha, "checkedAt": checkedAt]
+            let deleting = target["operation"] as? String == "delete"
+            if deleting { result["operation"] = "delete" }
             if let commit = target["commit"] as? String { result["commit"] = commit }
             if let url = target["liveURL"] as? String { result["liveURL"] = url }
-            if let published = articles[path], published["sha256"] as? String == sha {
+            if deleting, articles[path] == nil, let deployedCommit = manifest?["commit"] as? String, Self.validCommit(deployedCommit) {
+                // Absence alone is not proof: RepositoryStore must also verify
+                // that this manifest commit contains the confirmed deletion.
+                result["status"] = "deleted"
+                result["manifestCommit"] = deployedCommit
+                result["checkedAt"] = ISO8601DateFormatter().string(from: manifestCheckedAt)
+                result["message"] = manifestReachable ? "Removed from the published website." : "Removed when last checked. Status could not be refreshed."
+                results.append(result); continue
+            }
+            if !deleting, let published = articles[path], published["sha256"] as? String == sha {
                 result["status"] = "live"
                 result["checkedAt"] = ISO8601DateFormatter().string(from: manifestCheckedAt)
                 if let route = published["url"] as? String, route.hasPrefix("/"), !route.hasPrefix("//"),
@@ -72,6 +83,13 @@ final class DeploymentClient {
                 result["status"] = "uploaded"
                 result["message"] = "Saved on GitHub. Waiting to verify the website deployment."
                 if !manifestReachable { result["message"] = "Saved on GitHub. Deployment status is unavailable; your local work is safe." }
+            }
+            if deleting {
+                switch result["status"] as? String {
+                case "failed": result["message"] = "The website build failed. The source file was deleted, but the old page may still be online. Open build details."
+                case "building": result["message"] = "The website is rebuilding. Waiting to verify that this item is removed."
+                default: result["message"] = manifestReachable ? "Deleted from GitHub. Waiting to verify removal from the website." : "Deleted from GitHub. Website removal could not be checked yet."
+                }
             }
             results.append(result)
         }

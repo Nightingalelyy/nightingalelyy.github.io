@@ -39,6 +39,38 @@ private struct WriterPublication: Codable {
     var message: String?
 }
 
+private struct WriterLocalRemoval: Codable {
+    var expectedRevision: String
+    var sourceSHA256: String
+    var expectedRemoteBlob: String
+    var liveURL: String
+    var removedAt: String
+    var title: String?
+    var draft: WriterDraft?
+}
+
+private struct WriterDeletion: Codable {
+    var sourceSHA256: String
+    var commit: String
+    var status: String
+    var liveURL: String
+    var uploadedAt: String
+    var workflowURL: String?
+    var checkedAt: String?
+    var message: String?
+}
+
+private struct WriterDeletionIntent: Codable {
+    var commit: String
+    var parentCommit: String
+    var sourceSHA256: String
+    var expectedRevision: String
+    var remoteBlob: String
+    var liveURL: String
+    var createdAt: String
+    var retainedRef: String
+}
+
 private struct WriterTemplate: Codable {
     var id: String
     var name: String
@@ -56,6 +88,9 @@ private struct WriterState: Codable {
     var categories: [String]?
     var publications: [String: WriterPublication]?
     var templates: [String: WriterTemplate]?
+    var localRemovals: [String: WriterLocalRemoval]?
+    var deletions: [String: WriterDeletion]?
+    var deletionIntents: [String: WriterDeletionIntent]?
     var state = "ready"
     var message = "Ready to write offline."
     var lastSyncedAt: String?
@@ -126,6 +161,10 @@ final class RepositoryStore {
         }
         switch method {
         case "bootstrap", "status", "listArticles": return try bootstrap()
+        case "removeLocally": return try removeLocally(params)
+        case "restoreLocalRemoval": return try restoreLocalRemoval(params)
+        case "prepareDeletion": return try prepareDeletion(params)
+        case "deleteArticle": return try deleteArticle(params)
         case "renameCategory", "mergeCategory": return try renameCategory(params)
         case "listTemplates": return ["templates": templateList()]
         case "saveTemplate": return try saveTemplate(params)
@@ -156,7 +195,7 @@ final class RepositoryStore {
         case "readHistory": return try historyEntry(path: string(params, "path"), id: string(params, "id"))
         case "restoreHistory":
             let path = try string(params, "path")
-            guard state.queue[path] == nil else { throw fail("Cancel queued publication before restoring a version.") }
+            guard state.queue[path] == nil, state.deletionIntents?[path] == nil else { throw fail("Cancel queued publication and settle pending deletion status before restoring a version.") }
             let entry = try historyEntry(path: path, id: string(params, "id"))
             let content = entry["rawContent"] as! String
             if let current = state.drafts[path]?.rawContent ?? articles[path]?.rawContent {
@@ -166,6 +205,7 @@ final class RepositoryStore {
             try automaticBackup(force: true)
             state.drafts[path] = WriterDraft(rawContent: content, baseBlob: articles[path]?.blob, baseContent: articles[path]?.rawContent, updatedAt: now())
             state.conflicts.removeValue(forKey: path)
+            state.localRemovals?.removeValue(forKey: path)
             state.state = "local"; state.message = "Version restored locally. Choose Publish when ready."
             try persist(); return try bootstrap()
         case "readArticle": return try articleJSON(path: string(params, "path"))
@@ -175,7 +215,7 @@ final class RepositoryStore {
         case "createArticle":
             let path = try string(params, "path")
             try validateArticlePath(path, creating: true)
-            guard articles[path] == nil, state.drafts[path] == nil else { throw fail("An article already exists at this path. Choose another filename.") }
+            guard articles[path] == nil, state.drafts[path] == nil, state.localRemovals?[path] == nil, state.deletionIntents?[path] == nil else { throw fail("An article already exists at this path. Choose another filename.") }
             let raw = try string(params, "rawContent")
             try validateArticleContent(raw)
             try archiveContent(path: path, content: raw, reason: "created")
@@ -218,6 +258,7 @@ final class RepositoryStore {
         case "queuePublish":
             let path = try string(params, "path")
             try validateArticlePath(path)
+            guard state.deletionIntents?[path] == nil, state.localRemovals?[path] == nil else { throw fail("Restore the locally removed item and settle any deletion status before publishing.") }
             guard let draft = state.drafts[path] else { throw fail("There are no local changes to publish for this article.") }
             guard state.conflicts[path] == nil else { throw fail("Resolve the conflicting edits before publishing this article.") }
             if let expected = params["expectedRevision"] as? String, expected != digest(draft.rawContent) { throw fail("The article changed. Save and validate the current version before publishing.") }
@@ -255,6 +296,352 @@ final class RepositoryStore {
         }
     }
 
+    private func deletionIssue(_ path: String, _ code: String, _ message: String) -> [String: Any] {
+        ["severity": "error", "path": path, "code": code, "message": message]
+    }
+
+    private func localRemovalJSON(path: String, record: WriterLocalRemoval) -> [String: Any] {
+        var result: [String: Any] = ["path": path, "scope": "published", "status": "local", "expectedRevision": record.expectedRevision,
+            "sourceSHA256": record.sourceSHA256, "expectedRemoteBlob": record.expectedRemoteBlob, "liveURL": record.liveURL,
+            "removedAt": record.removedAt, "message": "Removed from this app. The GitHub source is unchanged; a separate confirmation is required to delete it."]
+        if let title = record.title { result["title"] = title }
+        return result
+    }
+
+    private func removeLocally(_ params: [String: Any]) throws -> [String: Any] {
+        guard params["confirmation"] as? String == "REMOVE" else { throw fail("Confirm removal from the app before continuing.") }
+        let path = try string(params, "path"); try validateArticlePath(path)
+        guard state.localRemovals?[path] == nil, state.deletionIntents?[path] == nil else { throw fail("This removal is already pending. Review its existing status.") }
+        guard state.queue[path] == nil, state.conflicts[path] == nil else { throw fail("Cancel queued publication and resolve conflicts before removing this article.") }
+        guard let raw = state.drafts[path]?.rawContent ?? articles[path]?.rawContent,
+              params["expectedRevision"] as? String == digest(raw) else { throw fail("This article changed. Reload it before removing it.") }
+        let draft = state.drafts[path], remote = articles[path]
+        if let remote, let draft, draft.baseBlob != remote.blob { throw fail("The online source changed since this draft began. Resolve that change before removing the article.") }
+        guard remote != nil || draft?.baseBlob == nil else { throw fail("The remote article is no longer cached. Refresh before deciding how to remove this draft.") }
+        try automaticBackup(force: true)
+        let previous = state
+        var archived: [URL] = []
+        do {
+            if let file = try archiveContent(path: path, content: raw, reason: "before-local-removal") { archived.append(file) }
+            if let remote, remote.rawContent != raw, let file = try archiveContent(path: path, content: remote.rawContent, reason: "published-before-local-removal") { archived.append(file) }
+            state.drafts.removeValue(forKey: path)
+            var result: [String: Any]
+            if let remote {
+                let title = (params["title"] as? String).map { String($0.prefix(300)) }
+                let record = WriterLocalRemoval(expectedRevision: digest(raw), sourceSHA256: digest(remote.rawContent), expectedRemoteBlob: remote.blob,
+                    liveURL: publicationJSON(path: path)?["liveURL"] as? String ?? liveURL(path), removedAt: now(), title: title, draft: draft)
+                var removals = state.localRemovals ?? [:]; removals[path] = record; state.localRemovals = removals
+                result = localRemovalJSON(path: path, record: record)
+            } else {
+                result = ["path": path, "scope": "local", "status": "deleted", "expectedRevision": digest(raw), "expectedRemoteBlob": "", "sourceSHA256": digest(raw), "removedAt": now(),
+                          "message": "Local draft removed. GitHub was not changed; its source remains available in History."]
+            }
+            state.message = result["message"] as! String
+            try persist()
+            var snapshot = try bootstrap(); snapshot["localRemoval"] = result; return snapshot
+        } catch {
+            state = previous
+            for file in archived { try? fm.removeItem(at: file) }
+            pendingHistoryPrunes.removeAll()
+            throw error
+        }
+    }
+
+    private func restoreLocalRemoval(_ params: [String: Any]) throws -> [String: Any] {
+        let path = try string(params, "path"); try validateArticlePath(path)
+        guard state.deletionIntents?[path] == nil else { throw fail("A GitHub deletion is awaiting confirmation. Refresh its status before restoring locally.") }
+        guard let record = state.localRemovals?[path] else { throw fail("This article is not locally removed.") }
+        guard record.draft != nil || articles[path] != nil else { throw fail("The online source is no longer present. Restore its saved version from History.") }
+        try automaticBackup(force: true)
+        if let draft = record.draft { state.drafts[path] = draft }
+        state.localRemovals?.removeValue(forKey: path)
+        state.message = "Restored in this app. GitHub was not changed."
+        try persist(); return try bootstrap()
+    }
+
+    private func prepareDeletion(_ params: [String: Any]) throws -> [String: Any] {
+        let path = try string(params, "path"); try validateArticlePath(path)
+        let suppliedRevision = try string(params, "expectedRevision")
+        var issues: [[String: Any]] = []
+        guard var removal = state.localRemovals?[path] else {
+            let local = state.drafts[path]
+            let isLocal = local != nil && local?.baseBlob == nil && articles[path] == nil
+            return ["path": path, "scope": isLocal ? "local" : "published", "expectedRevision": suppliedRevision, "expectedRemoteBlob": "", "canDelete": false,
+                    "issues": [deletionIssue(path, "remove_locally_first", "Remove this item from the app first. Deleting its GitHub source requires a second confirmation.")], "liveURL": liveURL(path)]
+        }
+        var plan: [String: Any] = ["path": path, "scope": "published", "expectedRevision": removal.expectedRevision,
+            "expectedRemoteBlob": removal.expectedRemoteBlob, "liveURL": removal.liveURL]
+        do { try fetch() }
+        catch {
+            plan["canDelete"] = false; plan["issues"] = [deletionIssue(path, "offline", "Connect to GitHub to review deletion. Deletions are never queued for automatic retry.")]
+            return try deletionPlanSnapshot(plan)
+        }
+        let pendingIntent = state.deletionIntents?[path]
+        if let pendingIntent {
+            plan["retrying"] = true
+            if cachedCommit != pendingIntent.parentCommit || articles[path]?.blob != pendingIntent.remoteBlob {
+                issues.append(deletionIssue(path, "deletion_pending", "The earlier deletion has not been settled and the remote source differs. Refresh its status before another decision."))
+            }
+            if params["renewReview"] as? Bool == true {
+                issues.append(deletionIssue(path, "deletion_pending", "An uncertain attempt must retain its original reviewed source. Review that attempt again instead."))
+            }
+        }
+        if state.queue[path] != nil || state.conflicts[path] != nil { issues.append(deletionIssue(path, "pending_work", "Cancel queued publication and resolve conflicts before deleting the GitHub source.")) }
+        guard let remote = articles[path] else {
+            plan["canDelete"] = false; plan["issues"] = issues + [deletionIssue(path, "source_missing", "The source is no longer present on GitHub. Refresh deletion status or recover its local version from History.")]
+            return try deletionPlanSnapshot(plan)
+        }
+        let remoteHash = digest(remote.rawContent)
+        if params["renewReview"] as? Bool == true && pendingIntent == nil {
+            guard suppliedRevision == remoteHash else {
+                plan["canDelete"] = false; plan["latestRevision"] = remoteHash; plan["canReviewLatest"] = true
+                plan["issues"] = [deletionIssue(path, "remote_changed", "The remote source changed again. Review its latest version before confirming deletion.")]
+                return try deletionPlanSnapshot(plan)
+            }
+            removal.expectedRemoteBlob = remote.blob; removal.sourceSHA256 = remoteHash; removal.expectedRevision = remoteHash
+            state.localRemovals?[path] = removal
+            do { try persist() }
+            catch {
+                plan["canDelete"] = false
+                plan["issues"] = [deletionIssue(path, "storage_failed", "The renewed review could not be saved on this Mac. Check local storage and review again.")]
+                return try deletionPlanSnapshot(plan)
+            }
+            plan["expectedRemoteBlob"] = removal.expectedRemoteBlob; plan["expectedRevision"] = removal.expectedRevision
+        } else if suppliedRevision != removal.expectedRevision {
+            issues.append(deletionIssue(path, "stale_revision", "This removal review is stale. Open a new deletion review."))
+        }
+        if remote.blob != removal.expectedRemoteBlob {
+            issues.append(deletionIssue(path, "remote_changed", "This source changed on GitHub after local removal. Review the latest source before deleting it."))
+            plan["latestRevision"] = remoteHash; plan["canReviewLatest"] = true
+        }
+        if issues.isEmpty {
+            do {
+                let report = try remainingSourceValidation(deleting: path)
+                let validationIssues = report["issues"] as? [[String: Any]] ?? []
+                issues += validationIssues
+                if report["ok"] as? Bool != true && !validationIssues.contains(where: { $0["severity"] as? String == "error" }) {
+                    issues.append(deletionIssue(path, "validation_failed", "Remaining site sources failed validation."))
+                }
+            } catch { issues.append(deletionIssue(path, "validation_unavailable", "The remaining site sources could not be validated. Nothing was deleted.")) }
+        }
+        plan["canDelete"] = !issues.contains { $0["severity"] as? String == "error" }
+        plan["issues"] = issues
+        return try deletionPlanSnapshot(plan)
+    }
+
+    private func deletionPlanSnapshot(_ plan: [String: Any]) throws -> [String: Any] {
+        var result = plan
+        result["snapshot"] = try bootstrap()
+        return result
+    }
+
+    private func remainingSourceValidation(deleting path: String) throws -> [String: Any] {
+        guard let validation else { return ["ok": true, "issues": []] }
+        let tree = try git(["ls-tree", "-r", "--name-only", "-z", remoteRef], at: repository).text.split(separator: "\0").map(String.init)
+        let files = tree.filter { $0 != path }
+        var documents = articles.filter { $0.key != path }.map { ["path": $0.key, "rawContent": $0.value.rawContent] }
+        let editable = Set(documents.compactMap { $0["path"] })
+        var routedDocuments = documents
+        for file in files where !editable.contains(file) && !file.hasPrefix("_") && (file.hasSuffix(".md") || file.hasSuffix(".html")) {
+            guard let raw = try? git(["show", "\(remoteRef):\(file)"], at: repository).text,
+                  raw.hasPrefix("---\n") || raw.hasPrefix("---\r\n") else { continue }
+            if file == "admin/index.md" { documents.append(["path": file, "rawContent": raw]) }
+            routedDocuments.append(["path": file, "rawContent": raw])
+        }
+        var routes = Set<String>()
+        for document in routedDocuments {
+            let file = document["path"]!, raw = document["rawContent"]!
+            let opening = raw.firstIndex(of: "\n")!
+            let end = raw.range(of: "(?m)^---[\\t ]*\\r?(?:\\n|$)", options: .regularExpression, range: raw.index(after: opening)..<raw.endIndex)
+            let header = end.map { String(raw[..<$0.lowerBound]) } ?? ""
+            let explicit = header.split(separator: "\n").first { $0.hasPrefix("permalink:") }.map { String($0.dropFirst(10)).trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }
+            if let explicit, explicit.hasPrefix("/") { routes.insert(explicit) }
+            else if file == "index.md" || file == "index.html" { routes.insert("/") }
+            else if file == "404.md" { routes.insert("/404.html") }
+            else if file.hasPrefix("_docs/") { routes.insert("/" + file.dropFirst(6).dropLast(3) + "/") }
+            else if file.hasSuffix("/index.md") || file.hasSuffix("/index.html") { routes.insert("/" + (file as NSString).deletingLastPathComponent + "/") }
+            else { routes.insert("/" + (file as NSString).deletingPathExtension + "/") }
+        }
+        return try validation(["schemaVersion": 1, "documents": documents.sorted { $0["path"]! < $1["path"]! }, "files": files, "routes": routes.sorted(),
+                               "site": ["url": "https://nightingalelyy.github.io", "baseurl": ""]])
+    }
+
+    private func deletionResponse(path: String, status: String, message: String, commit: String? = nil, issues: [[String: Any]] = []) throws -> [String: Any] {
+        var result = try bootstrap()
+        var deletion: [String: Any] = ["path": path, "scope": "published", "status": status, "message": message, "issues": issues]
+        if let commit { deletion["commit"] = commit }
+        result["deletion"] = deletion
+        return result
+    }
+
+    private func deleteArticle(_ params: [String: Any]) throws -> [String: Any] {
+        guard params["confirmation"] as? String == "DELETE" else { throw fail("A second explicit DELETE confirmation is required to erase the GitHub source.") }
+        let path = try string(params, "path"); try validateArticlePath(path)
+        guard params["scope"] as? String == "published", state.localRemovals?[path] != nil else { throw fail("Remove the item locally, then review and separately confirm its GitHub deletion.") }
+        let plan = try prepareDeletion(["path": path, "expectedRevision": try string(params, "expectedRevision")])
+        var issues = plan["issues"] as? [[String: Any]] ?? []
+        if params["expectedRemoteBlob"] as? String != plan["expectedRemoteBlob"] as? String { issues.append(deletionIssue(path, "stale_remote_blob", "The remote deletion review is stale. Review the current source again.")) }
+        guard plan["canDelete"] as? Bool == true, !issues.contains(where: { $0["severity"] as? String == "error" }),
+              let removal = state.localRemovals?[path], let remote = articles[path], let parent = cachedCommit else {
+            return try deletionResponse(path: path, status: "failed", message: "Deletion was blocked. The item remains locally removed and its GitHub source was not erased by this request.", issues: issues)
+        }
+        let retryIntent = state.deletionIntents?[path]
+        do {
+            guard retryIntent != nil || (state.deletionIntents?.count ?? 0) < 20 else { throw fail("Refresh pending deletion confirmations before starting another deletion.") }
+            try automaticBackup(force: true)
+            try archiveContent(path: path, content: remote.rawContent, reason: "before-repository-deletion")
+            if let draft = removal.draft, draft.rawContent != remote.rawContent { try archiveContent(path: path, content: draft.rawContent, reason: "unpublished-before-repository-deletion") }
+            let directory = root.appendingPathComponent("delete-\(UUID().uuidString)", isDirectory: true)
+            defer { try? fm.removeItem(at: directory) }
+            _ = try git(["clone", "--no-checkout", "--no-hardlinks", "--", repository.path, directory.path])
+            _ = try git(["remote", "set-url", "origin", remoteURL], at: directory)
+            let commit: String
+            if let intent = retryIntent {
+                guard parent == intent.parentCommit, remote.blob == intent.remoteBlob, removal.expectedRevision == intent.expectedRevision else {
+                    throw fail("The earlier deletion no longer matches the reviewed source. Refresh before retrying.")
+                }
+                // Reuse the exact retained commit. This remains idempotent if the first push was accepted late.
+                let changed = try git(["diff", "--name-only", "-z", intent.parentCommit, intent.commit], at: repository).text.split(separator: "\0").map(String.init)
+                let actualParent = try git(["rev-parse", "\(intent.commit)^"], at: repository).text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard changed == [path], actualParent == intent.parentCommit,
+                      (try? git(["cat-file", "-e", "\(intent.commit):\(path)"], at: repository)) == nil else {
+                    throw fail("The retained deletion does not match its original source. No retry was pushed.")
+                }
+                _ = try git(["fetch", "--no-tags", repository.path, intent.retainedRef], at: directory)
+                _ = try git(["checkout", "--detach", intent.commit], at: directory)
+                commit = intent.commit
+            } else {
+                _ = try git(["checkout", "--detach", parent], at: directory)
+                let name = identity?.name ?? ((try? git(["config", "--get", "user.name"], at: repository).text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? "")
+                let email = identity?.email ?? ((try? git(["config", "--get", "user.email"], at: repository).text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? "")
+                guard !name.isEmpty, !email.isEmpty else { throw fail("Git author identity is missing. No deletion was pushed.") }
+                _ = try git(["config", "user.name", name], at: directory); _ = try git(["config", "user.email", email], at: directory)
+                _ = try git(["--literal-pathspecs", "rm", "--", path], at: directory)
+                _ = try git(["-c", "commit.gpgsign=false", "commit", "-m", "Delete \((path as NSString).lastPathComponent) via Nightingale Writer"], at: directory)
+                commit = try git(["rev-parse", "HEAD"], at: directory).text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let changed = try git(["diff", "--name-only", "-z", parent, commit], at: directory).text.split(separator: "\0").map(String.init)
+                guard changed == [path], (try? git(["cat-file", "-e", "\(commit):\(path)"], at: directory)) == nil else {
+                    throw fail("The prepared commit changes more than the selected source. No deletion was pushed.")
+                }
+                let retainedRef = "refs/nightingale/deletions/\(UUID().uuidString.lowercased())"
+                _ = try git(["fetch", "--no-tags", directory.path, "+HEAD:\(retainedRef)"], at: repository)
+                var intents = state.deletionIntents ?? [:]
+                intents[path] = WriterDeletionIntent(commit: commit, parentCommit: parent, sourceSHA256: digest(remote.rawContent), expectedRevision: removal.expectedRevision,
+                    remoteBlob: remote.blob, liveURL: removal.liveURL, createdAt: now(), retainedRef: retainedRef)
+                state.deletionIntents = intents
+                // Durable intent is written before the irreversible push, and is never an execution queue.
+                do { try persist() }
+                catch { _ = try? git(["update-ref", "-d", retainedRef], at: repository); throw error }
+            }
+            do { _ = try git(["push", "origin", "HEAD:refs/heads/main"], at: directory, network: true) }
+            catch {
+                // Even a failed connection may have delivered the push. Only ancestry can settle it.
+                try? fetch()
+                if state.deletions?[path] != nil { return try deletionResponse(path: path, status: "uploaded", message: "The GitHub source was erased. Website removal is awaiting deployment verification.", commit: commit) }
+                if state.deletionIntents?[path] == nil { return try deletionResponse(path: path, status: "failed", message: "GitHub now has a different revision. The item remains locally removed; review the current source before trying again.") }
+                return try deletionResponse(path: path, status: "unknown", message: "Remote deletion could not be confirmed. Refresh to check it; this operation will never retry automatically.", commit: commit)
+            }
+            do {
+                _ = try git(["fetch", "--no-tags", directory.path, "+HEAD:\(remoteRef)"], at: repository)
+                try reloadArticles(); try reconcileDeletionIntents()
+                return try deletionResponse(path: path, status: "uploaded", message: "The GitHub source was erased. Website removal is awaiting deployment verification.", commit: commit)
+            } catch {
+                return try deletionResponse(path: path, status: "unknown", message: "GitHub accepted the deletion, but its local status could not be saved. Refresh to reconcile it; no deletion will be retried automatically.", commit: commit)
+            }
+        } catch {
+            let uncertain = state.deletionIntents?[path] != nil
+            return try deletionResponse(path: path, status: uncertain ? "unknown" : "failed",
+                message: "This deletion attempt could not be prepared or saved. No new deletion request was sent. " + error.localizedDescription,
+                issues: [deletionIssue(path, "preparation_failed", error.localizedDescription)])
+        }
+    }
+
+    private func isKnownDescendant(_ commit: String, of ancestor: String) -> Bool {
+        guard commit.range(of: "^[0-9a-f]{40,64}$", options: .regularExpression) != nil,
+              ancestor.range(of: "^[0-9a-f]{40,64}$", options: .regularExpression) != nil else { return false }
+        return (try? git(["merge-base", "--is-ancestor", ancestor, commit], at: repository)) != nil
+    }
+
+    private func reconcileDeletionIntents(persistChanges: Bool = true) throws {
+        guard let head = cachedCommit, !needsRestore else { return }
+        var changed = false, releaseRefs: [String] = []
+        for (path, intent) in state.deletionIntents ?? [:] {
+            if isKnownDescendant(head, of: intent.commit) {
+                if articles[path] == nil {
+                    var records = state.deletions ?? [:]
+                    records[path] = WriterDeletion(sourceSHA256: intent.sourceSHA256, commit: intent.commit, status: "uploaded", liveURL: intent.liveURL,
+                        uploadedAt: intent.createdAt, workflowURL: nil, checkedAt: nil, message: "GitHub source erased; website removal is awaiting verification.")
+                    state.deletions = records
+                    state.publications?.removeValue(forKey: path)
+                    state.localRemovals?.removeValue(forKey: path)
+                    if let newer = state.drafts[path] { state.drafts[path] = WriterDraft(rawContent: newer.rawContent, baseBlob: nil, baseContent: nil, updatedAt: newer.updatedAt) }
+                } else {
+                    // The source was deliberately recreated after the deletion commit.
+                    state.deletions?.removeValue(forKey: path)
+                }
+                state.deletionIntents?.removeValue(forKey: path); releaseRefs.append(intent.retainedRef); changed = true
+            } else if head != intent.parentCommit && isKnownDescendant(head, of: intent.parentCommit) {
+                // Another remote commit won the race. No automatic rebase or retry is allowed.
+                state.deletionIntents?.removeValue(forKey: path); releaseRefs.append(intent.retainedRef); changed = true
+            }
+        }
+        for (path, deletion) in state.deletions ?? [:] where articles[path] != nil && isKnownDescendant(head, of: deletion.commit) {
+            state.deletions?.removeValue(forKey: path); changed = true
+        }
+        if changed {
+            pruneDeletionRecords()
+            if persistChanges { try persist() }
+            for ref in releaseRefs { _ = try? git(["update-ref", "-d", ref], at: repository) }
+        }
+    }
+
+    private func pruneDeletionRecords() {
+        let records = state.deletions ?? [:]
+        let pending = records.filter { ["uploaded", "building"].contains($0.value.status) }
+        let finished = records.filter { !["uploaded", "building"].contains($0.value.status) }.sorted { $0.value.uploadedAt > $1.value.uploadedAt }
+        var kept = pending
+        for (path, record) in finished.prefix(max(0, 20 - pending.count)) { kept[path] = record }
+        state.deletions = kept
+    }
+
+    private func deletionRows(includeLocal: Bool) -> [[String: Any]] {
+        var rows: [String: [String: Any]] = [:]
+        if includeLocal {
+            for (path, removal) in state.localRemovals ?? [:] { rows[path] = localRemovalJSON(path: path, record: removal) }
+        }
+        for (path, record) in state.deletions ?? [:] {
+            var row: [String: Any] = ["operation": "delete", "path": path, "scope": "published", "sourceSHA256": record.sourceSHA256, "commit": record.commit,
+                "status": record.status, "liveURL": record.liveURL, "uploadedAt": record.uploadedAt]
+            if let value = record.workflowURL { row["workflowURL"] = value }
+            if let value = record.checkedAt { row["checkedAt"] = value }
+            if let value = record.message { row["message"] = value }
+            rows[path] = row
+        }
+        for (path, intent) in state.deletionIntents ?? [:] {
+            rows[path] = ["operation": "delete", "path": path, "scope": "published", "sourceSHA256": intent.sourceSHA256, "commit": intent.commit,
+                "status": "unknown", "expectedRevision": intent.expectedRevision, "expectedRemoteBlob": intent.remoteBlob, "liveURL": intent.liveURL, "uploadedAt": intent.createdAt,
+                "message": "Remote deletion confirmation pending. Refresh to verify; no automatic retry will occur."]
+        }
+        return rows.values.sorted { ($0["uploadedAt"] as? String ?? $0["removedAt"] as? String ?? "") > ($1["uploadedAt"] as? String ?? $1["removedAt"] as? String ?? "") }
+    }
+
+    private func applyDeletionStatus(_ result: [String: Any]) throws {
+        guard let path = result["path"] as? String, var record = state.deletions?[path],
+              result["sourceSHA256"] as? String == record.sourceSHA256, result["commit"] as? String == record.commit,
+              let status = result["status"] as? String, ["uploaded", "building", "deleted", "failed"].contains(status) else { return }
+        let checkedAt = result["checkedAt"] as? String ?? now()
+        if let previous = record.checkedAt, historyDate(previous) > historyDate(checkedAt) { return }
+        if status == "deleted" {
+            guard articles[path] == nil, let manifest = result["manifestCommit"] as? String, isKnownDescendant(manifest, of: record.commit) else { return }
+        }
+        if let workflow = result["workflowURL"] as? String {
+            guard workflow.hasPrefix("https://github.com/Nightingalelyy/nightingalelyy.github.io/actions/") else { return }
+            record.workflowURL = workflow
+        }
+        record.status = status; record.checkedAt = checkedAt; record.message = result["message"] as? String
+        state.deletions?[path] = record; pruneDeletionRecords()
+    }
+
     private func normalizedLabel(_ supplied: String, kind: String) throws -> String {
         guard !supplied.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) else {
             throw fail("\(kind) names cannot contain control characters or line breaks.")
@@ -283,7 +670,7 @@ final class RepositoryStore {
         let to = (state.categories ?? []).first { !sameLabel($0, from) && sameLabel($0, proposed) } ?? proposed
         guard let expected = params["expectedRevisions"] as? [String: String],
               let changes = params["changes"] as? [[String: Any]], changes.count <= 10000 else { throw fail("A category change requires a complete library revision snapshot.") }
-        let paths = Set(articles.keys).union(state.drafts.keys)
+        let paths = Set(articles.keys).union(state.drafts.keys).subtracting(state.localRemovals?.keys.map { $0 } ?? [])
         guard Set(expected.keys) == paths else { throw fail("The article library changed. Refresh it before renaming a category.") }
         for path in paths {
             let current = state.drafts[path]?.rawContent ?? articles[path]!.rawContent
@@ -439,7 +826,7 @@ final class RepositoryStore {
         guard try git(["rev-parse", "--is-bare-repository"], at: repository).text.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else { throw fail("The application repository must be bare.") }
         try reloadArticles()
         initialized = true
-        if !needsRestore { try persist() }
+        if !needsRestore { try reconcileDeletionIntents(persistChanges: false); try persist() }
     }
 
     private func persist() throws {
@@ -534,7 +921,7 @@ final class RepositoryStore {
 
     private func workFingerprint(_ value: WriterState) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(value.drafts) + encoder.encode(value.queue) + encoder.encode(value.categories) + encoder.encode(value.templates)
+        return try encoder.encode(value.drafts) + encoder.encode(value.queue) + encoder.encode(value.categories) + encoder.encode(value.templates) + encoder.encode(value.localRemovals)
     }
 
     func exportBackup() throws -> Data {
@@ -576,6 +963,7 @@ final class RepositoryStore {
         _ = try mergedTemplates(restored.templates ?? [:])
         for (path, draft) in restored.drafts { try validateArticlePath(path); try validateArticleContent(draft.rawContent) }
         for (path, queued) in restored.queue { try validateArticlePath(path); try validateArticleContent(queued.rawContent) }
+        for (path, removal) in restored.localRemovals ?? [:] { try validateArticlePath(path); if let draft = removal.draft { try validateArticleContent(draft.rawContent) } }
         for name in restored.categories ?? [] {
             guard !name.isEmpty, name.count <= 80, !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) else { throw fail("A backup category is invalid.") }
         }
@@ -641,17 +1029,22 @@ final class RepositoryStore {
                 try bytes.write(to: destination, options: .atomic); createdFiles.append(destination)
             }
             for (path, draft) in restored.drafts {
-                if state.drafts[path] == nil && state.queue[path] == nil {
+                if state.drafts[path] == nil && state.queue[path] == nil && state.localRemovals?[path] == nil {
                     state.drafts[path] = draft; draftsAdded += 1
                 } else if state.drafts[path]?.rawContent != draft.rawContent {
                     if let file = try archiveContent(path: path, content: draft.rawContent, reason: "imported-conflict") { createdFiles.append(file); versionsAdded += 1 }
                 }
             }
             for (path, queued) in restored.queue {
-                if state.drafts[path] == nil && state.queue[path] == nil {
+                if state.drafts[path] == nil && state.queue[path] == nil && state.localRemovals?[path] == nil {
                     state.drafts[path] = WriterDraft(rawContent: queued.rawContent, baseBlob: queued.baseBlob, baseContent: queued.baseContent, updatedAt: now()); draftsAdded += 1
                 } else if state.drafts[path]?.rawContent != queued.rawContent {
                     if let file = try archiveContent(path: path, content: queued.rawContent, reason: "imported-queued-version") { createdFiles.append(file); versionsAdded += 1 }
+                }
+            }
+            for (path, removal) in restored.localRemovals ?? [:] {
+                if let draft = removal.draft, let file = try archiveContent(path: path, content: draft.rawContent, reason: "imported-removed-draft") {
+                    createdFiles.append(file); versionsAdded += 1
                 }
             }
             for entry in histories {
@@ -717,7 +1110,7 @@ final class RepositoryStore {
 
     private func validationReport(path: String, raw: String) throws -> [String: Any] {
         guard let validation else { return ["ok": true, "issues": [], "summary": ["documents": 1, "codeBlocks": 0]] }
-        let tree = try git(["ls-tree", "-r", "--name-only", remoteRef], at: repository).text.split(separator: "\n").map(String.init)
+        let tree = try git(["ls-tree", "-r", "--name-only", "-z", remoteRef], at: repository).text.split(separator: "\0").map(String.init)
         let files = Array(Set(tree + referencedStagedAssets(raw) + [path])).sorted()
         var routes = Set(articles.keys.map { articlePath -> String in
             if articlePath == "index.md" { return "/" }
@@ -750,6 +1143,7 @@ final class RepositoryStore {
     }
 
     private func publicationJSON(path: String) -> [String: Any]? {
+        guard state.localRemovals?[path] == nil, state.deletionIntents?[path] == nil, state.deletions?[path] == nil else { return nil }
         let known = state.publications?[path]
         let sourceHash = articles[path].map { digest($0.rawContent) }
         let record: WriterPublication
@@ -766,7 +1160,8 @@ final class RepositoryStore {
     }
 
     private func publicationTargets() -> [[String: Any]] {
-        Set(articles.keys).union(state.publications?.keys.map { $0 } ?? []).sorted().compactMap { publicationJSON(path: $0) }
+        let publications = Set(articles.keys).union(state.publications?.keys.map { $0 } ?? []).sorted().compactMap { publicationJSON(path: $0) }
+        return publications + deletionRows(includeLocal: false)
     }
 
     func deploymentTargets() throws -> [String: Any] {
@@ -782,6 +1177,7 @@ final class RepositoryStore {
         guard let results = report["results"] as? [[String: Any]], results.count <= 10000 else { throw fail("Invalid deployment report.") }
         var publications = state.publications ?? [:]
         for result in results {
+            if result["operation"] as? String == "delete" { try applyDeletionStatus(result); continue }
             guard let path = result["path"] as? String, let target = publicationJSON(path: path), let hash = result["sourceSHA256"] as? String,
                   hash == target["sourceSHA256"] as? String, let status = result["status"] as? String,
                   ["uploaded", "building", "live", "failed", "unknown"].contains(status) else { continue }
@@ -861,9 +1257,9 @@ final class RepositoryStore {
     }
 
     private func bootstrap() throws -> [String: Any] {
-        let paths = Set(articles.keys).union(state.drafts.keys).sorted()
+        let paths = Set(articles.keys).union(state.drafts.keys).subtracting(state.localRemovals?.keys.map { $0 } ?? []).sorted()
         var result: [String: Any] = ["articles": try paths.map { try articleJSON(path: $0) }, "categories": state.categories ?? [], "templates": templateList(), "status": statusJSON(),
-                "repositoryPath": repository.path, "remoteURL": remoteURL, "branch": "main", "publications": publicationTargets(),
+                "repositoryPath": repository.path, "remoteURL": remoteURL, "branch": "main", "publications": publicationTargets().filter { $0["operation"] as? String != "delete" }, "deletions": deletionRows(includeLocal: true),
                 "recovery": ["needsRestore": needsRestore, "message": needsRestore ? state.message : "", "automaticBackupDirectory": root.appendingPathComponent("backups").path, "historyLimitPerArticle": 100]]
         if let warning = backupWarning { result["backupWarning"] = warning }
         return result
@@ -885,6 +1281,7 @@ final class RepositoryStore {
 
     private func saveDraft(path: String, raw: String, expected: String) throws -> [String: Any] {
         try validateArticlePath(path); try validateArticleContent(raw)
+        guard state.localRemovals?[path] == nil, state.deletionIntents?[path] == nil else { throw fail("Restore this locally removed item before editing it.") }
         guard let current = state.drafts[path]?.rawContent ?? articles[path]?.rawContent else { throw fail("Create the article before saving changes.") }
         guard digest(current) == expected else { throw fail("This article changed since it was opened. Reload it before saving, so neither version is overwritten.") }
         if raw != current { try archiveContent(path: path, content: current, reason: "autosave", coalesce: true) }
@@ -903,6 +1300,7 @@ final class RepositoryStore {
     private func fetch() throws {
         _ = try git(["fetch", "--no-tags", "origin", "+refs/heads/main:\(remoteRef)"], at: repository, network: true)
         try reloadArticles()
+        try reconcileDeletionIntents()
     }
 
     private func networkFailure(_ error: Error) {
@@ -1002,6 +1400,8 @@ final class RepositoryStore {
         var publications = state.publications ?? [:]
         publications[path] = WriterPublication(sourceSHA256: digest(snapshot.rawContent), commit: uploadedCommit, status: "uploaded", liveURL: liveURL(path), workflowURL: nil, checkedAt: nil, uploadedAt: now(), message: "Uploaded to GitHub; website deployment is not yet verified.")
         state.publications = publications
+        state.deletions?.removeValue(forKey: path)
+        state.localRemovals?.removeValue(forKey: path)
         try persist()
         // Record the successfully pushed commit without requiring another network request.
         _ = try git(["fetch", "--no-tags", directory.path, "+HEAD:\(remoteRef)"], at: repository)

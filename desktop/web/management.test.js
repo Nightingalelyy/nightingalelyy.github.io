@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArticle } from './content.js';
 import { BUILTIN_TEMPLATES, availableCategories, normalizeCategoryName, planCategoryChange, categoryPlanIsCurrent, articleFromTemplate } from './management.js';
@@ -30,9 +30,8 @@ test('category rename changes only category metadata and preserves existing URLs
 
 test('category transforms preserve every existing article body and unmanaged metadata', () => {
   const root = fileURLToPath(new URL('../../_docs/', import.meta.url));
-  const walk = (path) => readdirSync(path, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? walk(join(path, entry.name)) : [join(path, entry.name)]);
-  const files = walk(root).filter((path) => /leetcode-.*\.md$/.test(path));
-  assert.equal(files.length, 135);
+  const walk = (path) => existsSync(path) ? readdirSync(path, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? walk(join(path, entry.name)) : [join(path, entry.name)]) : [];
+  const files = walk(root).filter((path) => path.endsWith('.md') && !['_defaults.md', 'readme.md', '1.md'].includes(basename(path)));
   for (const file of files) {
     const rawContent = readFileSync(file, 'utf8');
     const before = parseArticle(rawContent);

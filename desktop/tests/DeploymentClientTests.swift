@@ -52,6 +52,20 @@ private struct TestFailure: Error { let message: String }
         try expect(DeploymentClient.workflowState(workflow("failure", file: ".github/workflows/unrelated.yml"), commit: commit)["status"] as? String == "uploaded", "Ignore unrelated workflows")
         try expect(DeploymentClient.workflowState(workflow("cancelled"), commit: commit)["status"] as? String == "uploaded", "Cancelled builds may have been superseded")
         try expect(!DeploymentClient.validCommit("../../other?token=x"), "Commit parameters cannot alter the request URL")
+        let deletionTarget: [String: Any] = ["targets": [["path": path, "sourceSHA256": sha, "commit": commit, "operation": "delete"]], "remoteCommit": later]
+        let removedClient = DeploymentClient(load: { _ in ["version": 1, "commit": later, "articles": [String: [String: Any]]()] })
+        let removed = first(removedClient.poll(deletionTarget))
+        try expect(removed["status"] as? String == "deleted", "Missing source in a valid manifest produces a removal candidate")
+        try expect(removed["operation"] as? String == "delete" && removed["manifestCommit"] as? String == later, "Removal candidate carries the manifest commit for backend ancestry verification")
+        try expect(removed["commit"] as? String == commit && removed["sourceSHA256"] as? String == sha, "Removal preserves the requested identity for stale-result rejection")
+        let stillPresentClient = DeploymentClient(load: { url in url.host == "nightingalelyy.github.io" ? manifest(sha) : workflow("success") })
+        try expect(first(stillPresentClient.poll(deletionTarget))["status"] as? String == "building", "Matching old article bytes must not mark a deletion live or deleted")
+        let failedRemoval = first(failedBuild.poll(deletionTarget))
+        try expect(failedRemoval["status"] as? String == "failed" && (failedRemoval["message"] as? String)?.contains("old page may still be online") == true, "Failed removal distinguishes deleted Git source from the still-live website")
+        let missingManifest = DeploymentClient(load: { _ in throw TestFailure(message: "offline") })
+        try expect(first(missingManifest.poll(deletionTarget))["status"] as? String == "uploaded", "Network failure is never proof of website deletion")
+        let invalidManifest = DeploymentClient(load: { url in url.host == "nightingalelyy.github.io" ? ["version": 1, "commit": "invalid", "articles": [String: [String: Any]]()] : workflow("success") })
+        try expect(first(invalidManifest.poll(deletionTarget))["status"] as? String == "building", "An invalid manifest commit cannot verify deletion")
         print("DeploymentClient tests passed: \(checks) assertions")
     }
 }

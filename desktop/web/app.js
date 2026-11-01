@@ -7,7 +7,7 @@ import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { api } from './api.js';
 import { parseArticle, editorFields, serializeArticle, normalizeDateForInput } from './content.js';
 import { renderMarkdownPreview, codeHighlightKey, planCodeHighlights, applyCodeHighlightResults } from './markdown.js';
-import { publicationView, mergePublicationRecords, validationSummary, issueLocation, compareHistoryVersions, safeExternalURL, workspaceRecovery } from './workflow.js';
+import { publicationView, mergePublicationRecords, validationSummary, issueLocation, compareHistoryVersions, safeExternalURL, workspaceRecovery, deletionReviewView, canConfirmDeletion, deletionView, canRemoveLocally, hasCurrentHistorySource, deletionActions } from './workflow.js';
 import { installWritingTools } from './writing-tools.js';
 import { installManagement } from './management.js';
 
@@ -27,6 +27,7 @@ const icons = {
   feather: '<path d="m4 20 11-11M9 15h5l6-6a4.24 4.24 0 0 0-6-6l-6 6v5l-4 6"/><path d="M10 8v6h6"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   trash: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>',
+  undo: '<path d="M3 10h11a6 6 0 0 1 0 12M3 10l5-5M3 10l5 5"/>',
   alert: '<path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5M12 17h.01"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 11h18M7 15h3M14 15h3"/>',
@@ -41,9 +42,11 @@ document.querySelectorAll('[data-icon]').forEach((node) => { node.innerHTML = ic
 const editable = new Compartment();
 const state = {
   articles: [], categories: [], active: null, parsed: null, initialFields: {}, savedRaw: '', filter: 'all', query: '', view: 'write', previewDevice: 'desktop',
-  status: {}, publications: [], busy: false, publishing: false, transitioning: false, editVersion: 0, selectionVersion: 0, ready: false, recoveryMode: false, recoveryMessage: '',
+  status: {}, publications: [], deletions: [], busy: false, publishing: false, transitioning: false, editVersion: 0, selectionVersion: 0, ready: false, recoveryMode: false, recoveryMessage: '',
 };
 const recovery = { history: null, historyGeneration: 0, validation: null, backup: null, busy: false };
+const removal = { local: null, remote: null, busy: false, refreshing: false };
+let snapshotGeneration = 0;
 let publicationPollInFlight = false;
 let publicationPollAt = 0;
 let editor;
@@ -118,6 +121,7 @@ function updateArticle(item) {
   return next;
 }
 function applySnapshot(snapshot, { updateDocument = true } = {}) {
+  snapshotGeneration++;
   if (snapshot?.categoryChange && state.filter === `category:${snapshot.categoryChange.from}`) state.filter = `category:${snapshot.categoryChange.to}`;
   if (snapshot?.recovery) {
     const access = workspaceRecovery(snapshot);
@@ -131,6 +135,7 @@ function applySnapshot(snapshot, { updateDocument = true } = {}) {
   if (Array.isArray(snapshot?.articles)) state.articles = snapshot.articles.map(enrich);
   if (Array.isArray(snapshot?.categories)) state.categories = snapshot.categories;
   if (Array.isArray(snapshot?.publications)) state.publications = snapshot.publications;
+  if (Array.isArray(snapshot?.deletions)) state.deletions = snapshot.deletions;
   if (snapshot?.status) state.status = snapshot.status;
   if (updateDocument && state.active) {
     const updated = state.articles.find((article) => article.path === state.active.path);
@@ -140,7 +145,7 @@ function applySnapshot(snapshot, { updateDocument = true } = {}) {
       state.active = { ...state.active, isDraft: updated.isDraft, isQueued: updated.isQueued, conflict: updated.conflict, publication: updated.publication };
     }
   }
-  applyWorkspaceAccess(); renderLibrary(); renderStatus(); renderDocumentStatus();
+  applyWorkspaceAccess(); renderLibrary(); renderStatus(); renderDocumentStatus(); renderDeletions();
 }
 function applyWorkspaceAccess() {
   const readOnly = state.recoveryMode || state.transitioning;
@@ -158,19 +163,22 @@ function applyPublicationSnapshot(snapshot) {
   for (const publication of snapshot?.publications || []) if (publication?.path) patches.set(publication.path, publication);
   for (const article of snapshot?.articles || []) if (article.publication) patches.set(article.path, article.publication);
   if (Array.isArray(snapshot?.publications)) state.publications = snapshot.publications;
+  if (Array.isArray(snapshot?.deletions)) state.deletions = snapshot.deletions;
   state.articles = mergePublicationRecords(state.articles, [...patches.values()]);
   if (state.active) state.active = mergePublicationRecords([state.active], [...patches.values()])[0];
-  renderLibrary(); renderStatus(); renderDocumentStatus();
+  renderLibrary(); renderStatus(); renderDocumentStatus(); renderDeletions();
 }
 async function pollPublications({ force = false } = {}) {
-  if (!state.ready || state.recoveryMode || state.busy || state.transitioning || publicationPollInFlight || document.querySelector('dialog[open]')) return;
-  const pending = state.articles.some((article) => publicationView(article).pending);
+  const openDialog = document.querySelector('dialog[open]');
+  if (!state.ready || state.recoveryMode || state.busy || state.transitioning || removal.refreshing || publicationPollInFlight || (openDialog && openDialog.id !== 'deletions-dialog')) return;
+  const pending = state.articles.some((article) => publicationView(article).pending) || state.deletions.some((record) => deletionView(record).pending);
   if (!force && Date.now() - publicationPollAt < (pending ? 30000 : 120000)) return;
   publicationPollInFlight = true;
   publicationPollAt = Date.now();
-  try { applyPublicationSnapshot(await api.pollPublicationStatus()); }
+  const generation = snapshotGeneration;
+  try { const snapshot = await api.pollPublicationStatus(); if (generation === snapshotGeneration) applyPublicationSnapshot(snapshot); }
   catch { /* Keep the last verified state; a network error does not mean a build failed. */ }
-  finally { publicationPollInFlight = false; }
+  finally { publicationPollInFlight = false; renderDeletions(); }
 }
 function allCategories() {
   return [...new Set([...state.categories, ...state.articles.filter((item) => item.path.startsWith('_docs/')).map((item) => item.meta.category)])].sort((a, b) => a.localeCompare(b));
@@ -226,6 +234,7 @@ function renderStatus() {
   let color = '';
   let text = status.message || 'Your library is available offline';
   if (state.recoveryMode) { text = 'Recovery mode · restore a backup to resume editing'; color = 'amber'; }
+  else if (removal.remote?.cancelled && removal.remote.loading) { text = 'Finishing the GitHub check before reopening the editor…'; color = 'blue'; }
   else if (state.busy) { text = 'Syncing with GitHub… Your local drafts are safe.'; color = 'blue'; }
   else if (conflicts) { text = `${conflicts} ${conflicts === 1 ? 'article needs' : 'articles need'} review before publishing`; color = 'amber'; }
   else if (stateName.includes('auth')) { text = status.message || 'GitHub sign-in needs attention. Your drafts are saved locally.'; color = 'amber'; }
@@ -240,6 +249,7 @@ function renderStatus() {
   $('#add-category-button').disabled = state.recoveryMode || state.busy || state.transitioning || !state.ready;
   $('#global-history-button').disabled = state.busy || state.transitioning || !state.ready;
   $('#backups-button').disabled = state.busy || state.transitioning || !state.ready;
+  $('#deletions-button').disabled = state.busy || state.transitioning || state.publishing || !state.ready;
 }
 function renderDocumentStatus() {
   if (!state.active) return;
@@ -252,6 +262,7 @@ function renderDocumentStatus() {
   $('#publish-button').disabled = state.recoveryMode || state.busy || state.publishing || state.transitioning || Boolean(state.active.conflict) || (!dirty && !state.active.isDraft);
   $('#image-button').disabled = state.recoveryMode || state.transitioning;
   $('#history-button').disabled = state.busy || state.transitioning || state.publishing;
+  $('#delete-button').disabled = state.recoveryMode || state.busy || state.transitioning || state.publishing || mediaBusy;
   $('#discard-button').hidden = !state.active.isDraft && !dirty;
   $('#discard-button').disabled = state.recoveryMode || state.active.isQueued || state.busy;
   $('#discard-button').title = state.active.isQueued ? 'Cancel the queued publish before discarding' : 'Discard local changes';
@@ -792,7 +803,7 @@ async function selectHistoryVersion(index) {
   $('#history-empty').hidden = false;
   $('#history-empty').textContent = 'Loading this version…';
   try {
-    const known = state.articles.find((article) => article.path === entry.path);
+    const known = hasCurrentHistorySource(entry.path, state.articles, state.deletions);
     const [selected, current] = await Promise.all([api.readHistory(entry.id, entry.path), known ? api.read(entry.path) : Promise.resolve(null)]);
     if (generation !== recovery.historyGeneration || recovery.history !== context || !$('#history-dialog').open) return;
     context.selected = selected; context.current = current; context.loading = false;
@@ -1050,6 +1061,213 @@ async function saveResolution() {
   } catch (error) { showError(error); }
   finally { $('#resolve-button').disabled = false; }
 }
+function clearDocument() {
+  clearTimeout(autosaveTimer); clearTimeout(previewTimer);
+  previewVersion++; pendingHighlightJob = null;
+  writingTools?.destroy(); writingTools = null;
+  editor?.destroy(); editor = null;
+  state.active = null; state.parsed = null; state.savedRaw = ''; state.initialFields = {};
+  $('#document').hidden = true; $('#empty-state').hidden = false;
+  $('#empty-title').textContent = 'Your writing, ready anywhere.';
+  $('#empty-message').textContent = 'Choose an article, restore one from Deletions or History, or create a new draft.';
+  try { localStorage.removeItem('nightingale.selectedPath'); } catch { /* Preference storage is optional. */ }
+}
+function applyRemovalSnapshot(snapshot, path) {
+  const removedActive = state.active?.path === path && Array.isArray(snapshot.articles) && !snapshot.articles.some((item) => item.path === path);
+  const previousIndex = state.articles.findIndex((item) => item.path === path);
+  if (removedActive) clearDocument();
+  applySnapshot(snapshot);
+  if (removedActive && state.articles.length) loadDocument(state.articles[Math.min(Math.max(0, previousIndex), state.articles.length - 1)]);
+}
+function removalAvailable() {
+  return state.ready && !state.recoveryMode && !state.busy && !state.publishing && !state.transitioning && !mediaBusy && !removal.busy;
+}
+async function openLocalRemoval() {
+  if (!removalAvailable() || !state.active || document.querySelector('dialog[open]')) return;
+  const context = { path: state.active.path, revision: state.active.revision };
+  removal.local = context; setTransition(true);
+  try {
+    await saveCurrent();
+    if (removal.local !== context || state.active?.path !== context.path) return;
+    context.revision = state.active.revision;
+    context.title = metadata(state.active).title;
+    $('#remove-target-title').textContent = context.title;
+    $('#remove-target-path').textContent = context.path;
+    $('#remove-confirmation').value = '';
+    $('#remove-error').hidden = true;
+    if (state.active.isQueued || state.active.conflict) {
+      $('#remove-error').textContent = state.active.isQueued ? 'Cancel the queued publish before removing this item.' : 'Resolve the conflicting versions before removing this item.';
+      $('#remove-error').hidden = false;
+    }
+    updateLocalRemovalControls();
+    $('#remove-dialog').showModal();
+  } catch (error) { removal.local = null; showError(error); }
+  finally { if (!$('#remove-dialog').open) setTransition(false); }
+}
+function updateLocalRemovalControls() {
+  const context = removal.local;
+  $('#remove-confirm-button').disabled = !context || context.path !== state.active?.path || context.revision !== state.active?.revision || !canRemoveLocally(state.active, $('#remove-confirmation').value, { dirty: isDirty(), busy: removal.busy, recoveryMode: state.recoveryMode });
+  $('#remove-confirm-button').textContent = removal.busy ? 'Removing…' : 'Remove from app';
+  $('#remove-confirmation').disabled = removal.busy;
+  $('#remove-dialog').querySelectorAll('[data-close]').forEach((button) => { button.disabled = removal.busy; });
+}
+async function confirmLocalRemoval(event) {
+  event?.preventDefault();
+  const context = removal.local;
+  if (!context || context.path !== state.active?.path || context.revision !== state.active?.revision || !canRemoveLocally(state.active, $('#remove-confirmation').value, { dirty: isDirty(), busy: removal.busy, recoveryMode: state.recoveryMode })) return;
+  removal.busy = true; updateLocalRemovalControls(); $('#remove-error').hidden = true;
+  let nextReview = null;
+  try {
+    const snapshot = await api.removeLocally(context.path, context.revision, context.title);
+    const record = snapshot.localRemoval;
+    if (!record || !['deleted', 'local'].includes(record.status)) throw new Error(record?.message || 'The local removal could not be confirmed. Your item has not been intentionally removed from GitHub.');
+    applyRemovalSnapshot(snapshot, context.path);
+    removal.local = null;
+    $('#remove-dialog').close();
+    if (record.scope === 'published' && record.status === 'local') nextReview = record;
+    else showToast('Local draft removed. GitHub and the website are unchanged.');
+  } catch (error) { $('#remove-error').textContent = error.message || String(error); $('#remove-error').hidden = false; }
+  finally {
+    removal.busy = false; updateLocalRemovalControls();
+    if (!$('#remove-dialog').open) setTransition(false);
+  }
+  if (nextReview) await openRemoteDeletion(nextReview);
+}
+function reviewItem(context) { return context ? { path: context.path, revision: context.revision } : null; }
+async function openRemoteDeletion(record) {
+  if (!removalAvailable() || document.querySelector('dialog[open]')) return;
+  const context = { path: record.path, revision: record.expectedRevision || record.sourceSHA256, title: record.title || record.path.split('/').pop(), review: null, loading: true, attempted: deletionActions(record).priorRequest };
+  removal.remote = context; setTransition(true);
+  $('#delete-target-title').textContent = context.title;
+  $('#delete-target-path').textContent = context.path;
+  $('#delete-confirmation').value = ''; $('#delete-error').hidden = true;
+  renderDeletionReview(); $('#delete-dialog').showModal();
+  await prepareRemoteDeletion(context);
+}
+async function prepareRemoteDeletion(context, { latest = false } = {}) {
+  if (removal.remote !== context || removal.busy || state.recoveryMode) return;
+  if (latest) {
+    if (context.review?.canReviewLatest !== true || !context.review.latestRevision) return;
+    context.revision = context.review.latestRevision;
+  }
+  context.loading = true; context.review = null;
+  $('#delete-confirmation').value = ''; $('#delete-error').hidden = true;
+  renderDeletionReview();
+  try {
+    const report = await api.prepareDeletion(context.path, context.revision, { renewReview: latest });
+    if (removal.remote !== context) return;
+    if (report.snapshot) applySnapshot(report.snapshot);
+    if (report.retrying || report.snapshot?.deletions?.some((record) => record.path === context.path && record.status === 'unknown')) context.attempted = true;
+    if (context.cancelled || !$('#delete-dialog').open) return;
+    context.review = report;
+  } catch (error) {
+    if (removal.remote === context) { $('#delete-error').textContent = error.message || String(error); $('#delete-error').hidden = false; }
+  } finally {
+    if (removal.remote === context) {
+      context.loading = false;
+      if (context.cancelled || !$('#delete-dialog').open) { removal.remote = null; setTransition(false); }
+      else renderDeletionReview();
+    }
+  }
+}
+function renderDeletionReview() {
+  const context = removal.remote;
+  if (!context) return;
+  const view = deletionReviewView(context.review, reviewItem(context));
+  const eligible = view.eligible && view.scope === 'published';
+  $('#delete-retention').textContent = context.attempted ? 'A GitHub removal was requested. Closing this dialog does not undo that request. Check Deletions for its result. Git history and existing backups are kept.' : 'The article or page is already removed from this app. Cancel keeps that local removal and leaves GitHub unchanged. Git history and existing backups are kept.';
+  $('#delete-keep-button').textContent = context.attempted ? 'Close' : 'Keep on GitHub';
+  $('#delete-description').textContent = context.loading ? 'Your local removal is complete. Checking the current GitHub file, links, and website before the separate online deletion.' : context.review?.retrying ? 'The earlier removal could not be confirmed. GitHub has been checked and the same removal request can be retried. Type DELETE again to send it; nothing retries automatically.' : view.description;
+  $('#delete-consequence').textContent = view.consequence;
+  $('#delete-consequence').hidden = !view.consequence;
+  $('#delete-review-status').textContent = context.loading ? (context.attempted ? 'Checking the current GitHub state…' : 'Checking GitHub… You can cancel and keep the file online.') : removal.busy ? 'Sending removal to GitHub…' : eligible ? 'Ready for your second confirmation. This action changes GitHub and the published website.' : 'GitHub deletion is not ready. Your local removal remains in place.';
+  $('#delete-issues').innerHTML = view.issues.map((issue) => `<li class="validation-issue ${issue.severity === 'warning' ? 'issue-warning' : 'issue-error'}"><div><p>${escapeHTML(issue.message || 'This removal needs review.')}</p>${issue.path ? `<span class="issue-path">${escapeHTML(issue.path)}${Number(issue.line) > 0 ? ` · line ${Number(issue.line)}` : ''}</span>` : ''}</div></li>`).join('');
+  $('#delete-confirm-label').hidden = !eligible;
+  $('#delete-confirm-button').hidden = !eligible;
+  $('#delete-confirm-button').disabled = !eligible || context.loading || !canConfirmDeletion(context.review, reviewItem(context), $('#delete-confirmation').value, { busy: removal.busy, recoveryMode: state.recoveryMode });
+  $('#delete-confirm-button').textContent = removal.busy ? 'Deleting…' : 'Delete from GitHub';
+  $('#delete-confirmation').disabled = removal.busy || context.loading;
+  $('#delete-latest-button').hidden = context.loading || context.review?.canReviewLatest !== true || !context.review?.latestRevision;
+  $('#delete-latest-button').disabled = removal.busy;
+  $('#delete-recheck-button').hidden = context.loading || eligible || context.review?.canReviewLatest === true;
+  $('#delete-recheck-button').disabled = removal.busy;
+  $('#delete-dialog').querySelectorAll('[data-close]').forEach((button) => { button.disabled = removal.busy; });
+}
+async function confirmRemoteDeletion(event) {
+  event?.preventDefault();
+  const context = removal.remote;
+  if (!context || context.loading || context.review?.scope !== 'published' || !canConfirmDeletion(context.review, reviewItem(context), $('#delete-confirmation').value, { busy: removal.busy, recoveryMode: state.recoveryMode })) return;
+  removal.busy = true; context.attempted = true; renderDeletionReview(); $('#delete-error').hidden = true;
+  try {
+    const snapshot = await api.deleteArticle(context.review);
+    applyRemovalSnapshot(snapshot, context.path);
+    const result = snapshot.deletion;
+    if (!result || !['uploaded', 'deleted'].includes(result.status)) {
+      context.review = null;
+      $('#delete-confirmation').value = '';
+      $('#delete-error').textContent = result?.message || 'The GitHub removal could not be confirmed. Refresh its status before trying again.';
+      $('#delete-error').hidden = false;
+      return;
+    }
+    removal.remote = null; $('#delete-dialog').close();
+    showToast(result.status === 'deleted' ? 'Removal confirmed. Review its status in Deletions.' : 'Removal uploaded to GitHub. Waiting for the website build.');
+  } catch (error) {
+    context.review = null; $('#delete-confirmation').value = '';
+    $('#delete-error').textContent = error.message || String(error); $('#delete-error').hidden = false;
+  } finally {
+    removal.busy = false;
+    if ($('#delete-dialog').open) renderDeletionReview();
+    else { setTransition(false); void pollPublications({ force: true }); }
+  }
+}
+function renderDeletions() {
+  const records = [...state.deletions].sort((a, b) => String(b.removedAt || b.uploadedAt || '').localeCompare(String(a.removedAt || a.uploadedAt || '')));
+  const pending = records.filter((record) => deletionView(record).pending).length;
+  $('#deletions-count').hidden = !records.length;
+  $('#deletions-count').textContent = pending ? `${pending} pending` : String(records.length);
+  $('#deletions-list').innerHTML = records.map((record) => {
+    const view = deletionView(record);
+    const actions = deletionActions(record);
+    const link = safeExternalURL(record.workflowURL);
+    const disabled = state.recoveryMode || removal.busy ? ' disabled' : '';
+    const restoreAction = actions.canRestore ? `<button class="button small" data-restore-removal="${escapeHTML(record.path)}"${disabled}>Restore locally</button>` : '';
+    const reviewAction = actions.canReview ? `<button class="button small" data-delete-remote="${escapeHTML(record.path)}"${disabled}>${actions.reviewLabel}</button>` : '';
+    return `<article class="deletion-record"><div class="deletion-record-heading"><strong>${escapeHTML(record.title || record.path.split('/').pop())}</strong><span class="deletion-status deletion-${view.tone}">${escapeHTML(view.label)}</span></div><code>${escapeHTML(record.path)}</code><p>${escapeHTML(view.message)}</p><div class="deletion-record-actions">${restoreAction}${reviewAction}${link ? `<a href="${escapeHTML(link)}" class="notice-link" data-deletion-link>View build</a>` : ''}<button class="button quiet small" data-deletion-history="${escapeHTML(record.path)}">History</button></div></article>`;
+  }).join('') || '<div class="deletions-empty">No removals to track. A local-only draft is removed immediately and can be recovered from History.</div>';
+  $('#deletions-refresh-button').disabled = state.recoveryMode || removal.refreshing || publicationPollInFlight;
+  $('#deletions-refresh-button').textContent = removal.refreshing ? 'Checking…' : 'Refresh status';
+}
+async function openDeletions() {
+  if (!state.ready || state.busy || state.transitioning || state.publishing || document.querySelector('dialog[open]')) return;
+  setTransition(true);
+  try {
+    await saveCurrent(); $('#deletions-error').hidden = true;
+    renderDeletions(); $('#deletions-dialog').showModal();
+  } catch (error) { showError(error); }
+  finally { setTransition(false); }
+}
+async function refreshDeletions() {
+  if (state.recoveryMode || removal.refreshing || publicationPollInFlight) return;
+  removal.refreshing = true; renderDeletions(); $('#deletions-error').hidden = true;
+  const generation = snapshotGeneration;
+  try {
+    const snapshot = await api.pollPublicationStatus();
+    if (generation === snapshotGeneration) applyPublicationSnapshot(snapshot);
+  } catch (error) { $('#deletions-error').textContent = error.message || String(error); $('#deletions-error').hidden = false; }
+  finally { removal.refreshing = false; renderDeletions(); }
+}
+async function restoreRemoval(path) {
+  if (state.recoveryMode || removal.busy || state.busy || state.publishing || state.transitioning) return;
+  removal.busy = true; setTransition(true); renderDeletions(); $('#deletions-error').hidden = true;
+  try {
+    applySnapshot(await api.restoreLocalRemoval(path));
+    $('#deletions-dialog').close();
+    const item = state.articles.find((article) => article.path === path);
+    if (item) loadDocument(item);
+    showToast('Restored to this app. GitHub and the website are unchanged.');
+  } catch (error) { $('#deletions-error').textContent = error.message || String(error); $('#deletions-error').hidden = false; }
+  finally { removal.busy = false; setTransition(false); renderDeletions(); }
+}
 async function discardCurrent() {
   if (state.recoveryMode || !state.active || state.active.isQueued) return;
   $('#confirm-message').textContent = state.active.path.startsWith('_docs/') ? 'This removes your unpublished changes from this Mac. The online article will stay unchanged.' : 'This removes your local page edits. The online page will stay unchanged.';
@@ -1064,11 +1282,10 @@ async function confirmDiscard() {
   try {
     await saveChain.catch(() => {});
     const snapshot = await api.discard(path);
-    state.active = null; state.parsed = null; state.savedRaw = '';
+    clearDocument();
     applySnapshot(snapshot, { updateDocument: false });
     const next = state.articles.find((article) => article.path === path) || state.articles.find((article) => article.path.startsWith('_docs/'));
     if (next) loadDocument(next);
-    else { editor?.destroy(); editor = null; $('#document').hidden = true; $('#empty-state').hidden = false; $('#empty-message').textContent = 'Create an article to begin.'; }
     $('#confirm-dialog').close();
     showToast('Local draft discarded.');
   } catch (error) { showError(error); }
@@ -1117,6 +1334,42 @@ $('#search').addEventListener('input', (event) => { state.query = event.target.v
 ['title-input', 'date-input', 'category-input', 'author-input', 'order-input', 'tags-input'].forEach((id) => $(`#${id}`).addEventListener('input', onEdit));
 $('#save-button').addEventListener('click', () => saveCurrent().catch(showError));
 $('#publish-button').addEventListener('click', publishCurrent);
+$('#delete-button').addEventListener('click', openLocalRemoval);
+$('#remove-form').addEventListener('submit', confirmLocalRemoval);
+$('#remove-confirmation').addEventListener('input', updateLocalRemovalControls);
+$('#delete-form').addEventListener('submit', confirmRemoteDeletion);
+$('#delete-confirmation').addEventListener('input', renderDeletionReview);
+$('#delete-recheck-button').addEventListener('click', () => { if (removal.remote) void prepareRemoteDeletion(removal.remote); });
+$('#delete-latest-button').addEventListener('click', () => { if (removal.remote) void prepareRemoteDeletion(removal.remote, { latest: true }); });
+$('#deletions-button').addEventListener('click', openDeletions);
+$('#deletions-refresh-button').addEventListener('click', refreshDeletions);
+$('#deletions-history-button').addEventListener('click', () => { $('#deletions-dialog').close(); void openHistory(); });
+$('#deletions-list').addEventListener('click', async (event) => {
+  const restore = event.target.closest('[data-restore-removal]');
+  const remote = event.target.closest('[data-delete-remote]');
+  const history = event.target.closest('[data-deletion-history]');
+  const link = event.target.closest('[data-deletion-link]');
+  if (restore) { await restoreRemoval(restore.dataset.restoreRemoval); }
+  else if (remote) {
+    const record = state.deletions.find((item) => item.path === remote.dataset.deleteRemote && deletionActions(item).canReview);
+    if (record && removalAvailable()) { $('#deletions-dialog').close(); await openRemoteDeletion(record); }
+  } else if (history && !removal.busy) { $('#deletions-dialog').close(); await openHistory(history.dataset.deletionHistory); }
+  else if (link) { event.preventDefault(); const url = safeExternalURL(link.href); if (url) { try { await api.openExternal(url); } catch (error) { showError(error); } } }
+});
+for (const id of ['remove-dialog', 'delete-dialog', 'deletions-dialog']) {
+  $(`#${id}`).addEventListener('cancel', (event) => { if (removal.busy) event.preventDefault(); });
+}
+$('#remove-dialog').addEventListener('close', () => {
+  if ($('#remove-dialog').open) return;
+  removal.local = null;
+  if (!$('#delete-dialog').open && !removal.remote?.loading && !removal.busy) setTransition(false);
+});
+$('#delete-dialog').addEventListener('close', () => {
+  if ($('#delete-dialog').open) return;
+  if (removal.remote?.loading) { removal.remote.cancelled = true; renderStatus(); return; }
+  removal.remote = null;
+  if (!removal.busy) setTransition(false);
+});
 $('#sync-button').addEventListener('click', () => runSync());
 $('#new-button').addEventListener('click', newArticle);
 $('#add-category-button').addEventListener('click', newCategory);
@@ -1133,6 +1386,7 @@ document.querySelectorAll('[data-preview-device]').forEach((button) => button.ad
 $('#site-preview-frame').addEventListener('load', () => { previewArticlePath = null; renderPreview(); });
 document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => {
   if (recovery.busy && ['history-dialog', 'backup-dialog'].includes(button.dataset.close)) return;
+  if (removal.busy && ['remove-dialog', 'delete-dialog', 'deletions-dialog'].includes(button.dataset.close)) return;
   $(`#${button.dataset.close}`).close();
 }));
 $('#history-button').addEventListener('click', () => openHistory(state.active?.path));
@@ -1174,7 +1428,7 @@ window.addEventListener('online', () => { if (state.articles.some((item) => item
 setInterval(() => { if (state.ready && state.articles.some((item) => item.isQueued && !item.conflict)) runSync({ quiet: true, publish: true }); }, 30000);
 setInterval(() => { void pollPublications(); }, 15000);
 window.writer = {
-  async flushBeforeClose() { if (recovery.busy || mediaBusy || management?.isBusy()) throw new Error('Wait for the current operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
+  async flushBeforeClose() { if (recovery.busy || removal.busy || mediaBusy || management?.isBusy()) throw new Error('Wait for the current operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
   newArticle, saveCurrent, pasteImage, refresh: () => runSync(), publishCurrent, showHistory: () => openHistory(state.active?.path), showAllHistory: () => openHistory(), showBackups: openBackups,
 };
 management = installManagement({ api, getSnapshot: () => ({ articles: state.articles, categories: state.categories, active: state.active }), saveActive: saveCurrent, applySnapshot, selectArticle,

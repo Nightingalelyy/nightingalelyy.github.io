@@ -33,6 +33,7 @@
           <div class="categories-heading"><div class="section-label">CATEGORIES</div><button id="add-category-button" class="icon-button" title="Add category" aria-label="Add category" disabled><span data-icon="plus"></span></button></div>
           <nav id="category-nav" aria-label="Article categories"></nav>
           <div class="sidebar-bottom">
+            <button id="deletions-button" class="sidebar-action"><span data-icon="trash"></span>Deletions<span id="deletions-count" class="count" hidden></span></button>
             <button id="global-history-button" class="sidebar-action"><span data-icon="clock"></span>History &amp; recovery</button>
             <button id="backups-button" class="sidebar-action"><span data-icon="laptop"></span>Backups</button>
             <button id="manage-categories-button" class="sidebar-action"><span data-icon="folder"></span>Manage categories</button>
@@ -61,7 +62,8 @@
               <div class="document-location"><span data-icon="page"></span><span id="document-category">Article</span><span class="small-dot">·</span><span id="document-state">Saved</span></div>
               <div class="document-actions">
                 <button id="history-button" class="icon-button muted" title="Article history" aria-label="Article history"><span data-icon="clock"></span></button>
-                <button id="discard-button" class="icon-button muted" title="Discard local changes" aria-label="Discard local draft" hidden><span data-icon="trash"></span></button>
+                <button id="discard-button" class="icon-button muted" title="Discard local changes" aria-label="Discard local changes" hidden><span data-icon="undo"></span></button>
+                <button id="delete-button" class="button quiet delete-action" title="Review deletion of this article or page">Delete…</button>
                 <button id="cancel-queue-button" class="button quiet" hidden>Cancel queued publish</button>
                 <button id="save-button" class="button quiet"><span data-icon="check"></span><span id="save-label">Saved</span></button>
                 <button id="publish-button" class="button primary"><span data-icon="upload"></span><span>Publish</span></button>
@@ -138,6 +140,41 @@
     </dialog>
 
     <dialog id="confirm-dialog" class="modal confirmation-modal"><h2>Discard this local draft?</h2><p id="confirm-message" class="modal-description">The online article will stay unchanged.</p><div class="modal-actions"><button id="confirm-cancel" class="button">Keep draft</button><button id="confirm-discard" class="button danger">Discard local draft</button></div></dialog>
+
+    <dialog id="remove-dialog" class="modal delete-modal" role="dialog" aria-modal="true" aria-labelledby="remove-title" aria-describedby="remove-description">
+      <form id="remove-form">
+        <div class="modal-heading"><span class="modal-icon amber" data-icon="trash"></span><button type="button" class="icon-button" data-close="remove-dialog" aria-label="Cancel local removal"><span data-icon="close"></span></button></div>
+        <h2 id="remove-title">Remove from this app?</h2><p id="remove-description" class="modal-description">First, remove this article or page from your local library. This step leaves GitHub and the published website unchanged, and works offline.</p>
+        <div class="delete-target"><strong id="remove-target-title"></strong><code id="remove-target-path"></code></div>
+        <p class="delete-retention">If it is published, you will get a separate confirmation to delete it from GitHub and the website. Cancelling that second step keeps only this local removal. Git history and existing backups are kept.</p>
+        <div id="remove-error" class="inline-error" role="alert" hidden></div>
+        <label for="remove-confirmation">Type REMOVE to confirm<input id="remove-confirmation" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Type REMOVE to confirm local removal" /></label>
+        <div class="modal-actions"><button type="button" class="button" data-close="remove-dialog">Cancel</button><button type="submit" id="remove-confirm-button" class="button danger" disabled>Remove from app</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-dialog" class="modal delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
+      <form id="delete-form">
+        <div class="modal-heading"><span class="modal-icon amber" data-icon="trash"></span><button type="button" class="icon-button" data-close="delete-dialog" aria-label="Cancel deletion"><span data-icon="close"></span></button></div>
+        <h2 id="delete-title">Also delete from GitHub and the website?</h2><p id="delete-description" class="modal-description"></p>
+        <div class="delete-target"><strong id="delete-target-title"></strong><code id="delete-target-path"></code></div>
+        <p id="delete-consequence" class="delete-consequence" hidden></p>
+        <p id="delete-retention" class="delete-retention">The article or page is already removed from this app. Cancel keeps that local removal and leaves GitHub unchanged. Git history and existing backups are kept.</p>
+        <p id="delete-review-status" class="delete-review-status" role="status"></p>
+        <ul id="delete-issues" class="validation-issues"></ul>
+        <div id="delete-error" class="inline-error" role="alert" hidden></div>
+        <label id="delete-confirm-label" for="delete-confirmation" hidden>Type DELETE to confirm<input id="delete-confirmation" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Type DELETE to confirm deletion" /></label>
+        <div class="modal-actions"><button type="button" id="delete-latest-button" class="button quiet" hidden>Review latest version</button><button type="button" id="delete-recheck-button" class="button quiet" hidden>Check again</button><button type="button" id="delete-keep-button" class="button" data-close="delete-dialog">Keep on GitHub</button><button type="submit" id="delete-confirm-button" class="button danger" hidden disabled>Delete from GitHub</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="deletions-dialog" class="modal deletions-modal" role="dialog" aria-modal="true" aria-labelledby="deletions-title">
+      <div class="modal-heading"><span class="modal-icon" data-icon="trash"></span><button type="button" class="icon-button" data-close="deletions-dialog" aria-label="Close deletions"><span data-icon="close"></span></button></div>
+      <h2 id="deletions-title">Deletions</h2><p class="modal-description">Local removal leaves GitHub unchanged. Deleting from GitHub needs a separate confirmation, then a successful website build.</p>
+      <div id="deletions-error" class="inline-error" role="alert" hidden></div>
+      <div id="deletions-list" class="deletions-list" aria-label="Website removal status"></div>
+      <div class="modal-actions"><button id="deletions-history-button" class="button quiet">History &amp; recovery</button><button id="deletions-refresh-button" class="button">Refresh status</button><button type="button" class="button" data-close="deletions-dialog">Close</button></div>
+    </dialog>
 
     <dialog id="validation-dialog" class="modal validation-modal" aria-labelledby="validation-title">
       <div class="modal-heading"><span class="modal-icon amber" data-icon="alert"></span><button type="button" class="icon-button" data-close="validation-dialog" aria-label="Close publication checks"><span data-icon="close"></span></button></div>

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { publicationView, mergePublicationRecords, validationSummary, issueLocation, compareHistoryVersions, safeExternalURL, workspaceRecovery } from './workflow.js';
+import { publicationView, mergePublicationRecords, validationSummary, issueLocation, compareHistoryVersions, safeExternalURL, workspaceRecovery, deletionReviewView, canConfirmDeletion, deletionView, canRemoveLocally, hasCurrentHistorySource, deletionActions } from './workflow.js';
 
 test('publication states distinguish local edits from the exact uploaded version', () => {
   const item = { path: '_docs/article.md', revision: 'current', isDraft: false, isQueued: false };
@@ -98,4 +98,68 @@ test('corrupt-workspace recovery is explicit and a successful restore clears rea
   const restored = workspaceRecovery({ recovery: { needsRestore: false, message: 'Old recovery message' } });
   assert.deepEqual(restored, { needsRestore: false, message: '' });
   assert.deepEqual(workspaceRecovery({ recovery: { automaticBackupDirectory: '/private/backups' } }), { needsRestore: false, message: '' });
+});
+
+test('local removal and remote deletion require distinct exact confirmations', () => {
+  const item = { path: '_docs/a.md', revision: 'saved', isDraft: true };
+  const review = { path: item.path, scope: 'published', expectedRevision: 'saved', expectedRemoteBlob: 'remote-blob', canDelete: true, issues: [] };
+  assert.equal(canRemoveLocally(item, 'REMOVE'), true);
+  assert.equal(canRemoveLocally(item, 'DELETE'), false);
+  assert.equal(canConfirmDeletion(review, item, 'REMOVE'), false);
+  assert.equal(canConfirmDeletion(review, item, 'DELETE'), true);
+  for (const value of ['delete', ' DELETE', 'DELETE\n', '']) assert.equal(canConfirmDeletion(review, item, value), false);
+  for (const options of [{ dirty: true }, { busy: true }, { recoveryMode: true }]) {
+    assert.equal(canRemoveLocally(item, 'REMOVE', options), false);
+    assert.equal(canConfirmDeletion(review, item, 'DELETE', options), false);
+  }
+  for (const changed of [{ ...item, revision: 'edited' }, { ...item, path: '_docs/b.md' }, { ...item, isQueued: true }, { ...item, conflict: {} }]) assert.equal(canConfirmDeletion(review, changed, 'DELETE'), false);
+});
+
+test('a remote delete requires a valid reviewed blob and no blocking issues', () => {
+  const item = { path: 'index.md', revision: 'saved' };
+  const review = { path: item.path, scope: 'published', expectedRevision: 'saved', expectedRemoteBlob: 'blob', canDelete: true, issues: [] };
+  for (const invalid of [null, { ...review, canDelete: false }, { ...review, scope: 'other' }, { ...review, expectedRemoteBlob: '' }, { ...review, expectedRemoteBlob: null }, { ...review, issues: [{ severity: 'error', message: 'Linked from another article.' }] }, { ...review, issues: ['Review unavailable'] }]) assert.equal(canConfirmDeletion(invalid, item, 'DELETE'), false);
+  assert.equal(canConfirmDeletion({ ...review, issues: [{ severity: 'warning', message: 'This is your homepage.' }] }, item, 'DELETE'), true);
+  assert.match(deletionReviewView(review, item).consequence, /homepage/);
+  assert.match(deletionReviewView({ ...review, path: '404.html' }, { ...item, path: '404.html' }).consequence, /custom 404/);
+  assert.equal(deletionReviewView({ ...review, path: '_docs/a.md' }, { ...item, path: '_docs/a.md' }).consequence, '');
+});
+
+test('removal statuses never claim website removal before deployment verification', () => {
+  assert.equal(deletionView({ status: 'local' }).label, 'Removed from this app');
+  assert.match(deletionView({ status: 'local' }).message, /website are unchanged/);
+  assert.equal(deletionView({ status: 'local' }).pending, false);
+  for (const status of ['uploaded', 'building', 'unknown']) {
+    const view = deletionView({ status });
+    assert.equal(view.pending, true);
+    assert.notEqual(view.label, 'Removed from site');
+    assert.notEqual(view.tone, 'success');
+  }
+  assert.equal(deletionView({ status: 'deleted' }).label, 'Removed from site');
+  assert.equal(deletionView({ status: 'deleted' }).pending, false);
+  assert.equal(deletionView({ status: 'failed' }).tone, 'error');
+  assert.equal(deletionView({ status: 'unrecognized' }).label, 'Confirmation pending');
+});
+
+test('history restore reads hidden local-removal source for its current revision', () => {
+  const path = '_docs/hidden.md';
+  assert.equal(hasCurrentHistorySource(path, [], [{ path, status: 'local' }]), true);
+  assert.equal(hasCurrentHistorySource(path, [{ path }], []), true);
+  for (const status of ['uploaded', 'building', 'deleted']) assert.equal(hasCurrentHistorySource(path, [], [{ path, status }]), false);
+  assert.equal(hasCurrentHistorySource(path, [], [{ path: '_docs/other.md', status: 'local' }]), false);
+  assert.equal(hasCurrentHistorySource(path, [], []), false);
+});
+
+test('uncertain deletion offers an explicit review without claiming it was only removed locally', () => {
+  const unknown = { path: '_docs/a.md', status: 'unknown', sourceSHA256: 'saved' };
+  assert.deepEqual(deletionActions(unknown), { canRestore: false, canReview: true, reviewLabel: 'Review deletion again', priorRequest: true });
+  assert.equal(deletionView(unknown).label, 'Confirmation pending');
+  assert.deepEqual(deletionActions({ status: 'local' }), { canRestore: true, canReview: true, reviewLabel: 'Delete from GitHub…', priorRequest: false });
+  for (const status of ['uploaded', 'building', 'deleted', 'failed']) assert.equal(deletionActions({ status }).canReview, false);
+  const item = { path: unknown.path, revision: 'saved' };
+  const review = { path: unknown.path, scope: 'published', expectedRevision: 'saved', expectedRemoteBlob: 'unchanged-blob', canDelete: true, retrying: true, issues: [] };
+  assert.equal(canConfirmDeletion(review, item, ''), false);
+  assert.equal(canConfirmDeletion(review, item, 'REMOVE'), false);
+  assert.equal(canConfirmDeletion(review, item, 'DELETE'), true);
+  assert.equal(canConfirmDeletion({ ...review, canDelete: false }, item, 'DELETE'), false);
 });

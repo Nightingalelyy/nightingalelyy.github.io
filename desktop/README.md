@@ -95,6 +95,32 @@ Closing the app waits for pending local saves.
 
 ## History and backups
 
+Choose **Delete…** to remove the selected article or editable page. There are two
+separate confirmations:
+
+1. **Remove from this app** removes it from the local library, including across
+   restarts and syncs. Type `REMOVE` to confirm. Local-only drafts finish here.
+2. For a published item, **Also delete from GitHub and the website?** checks the
+   latest repository version and any remaining links to that page. Type `DELETE`
+   and confirm again to delete its source file from GitHub. This step requires
+   a connection and is never queued for an automatic retry.
+
+Cancel the second step to keep the online article unchanged. Open **Deletions**
+to restore a local removal, return to the GitHub confirmation, or check whether
+a confirmed deletion has reached the website. An uploaded deletion is only
+marked removed from the website after its deployment is verified. A failed
+build can leave the previous page online even though its source was deleted.
+
+GitHub changes made since the review block deletion until reviewed again.
+Queued publications and conflicts must be cancelled or resolved first. Links
+from remaining articles must be fixed before deleting their destination.
+Deleting the homepage makes the root site URL unavailable; deleting the custom
+not-found page leaves the hosting service's default error page.
+
+Deletion removes the current source file. **Git history, local recovery history,
+existing backups, and shared images are retained**; this is not a history purge.
+Unpublished local changes remain recoverable when you restore a local removal.
+
 Open **Article history** in the document toolbar to compare a saved revision
 with the current article. **History & recovery** in the sidebar also shows
 discarded drafts. **Restore as local draft** keeps a recovery copy of the current

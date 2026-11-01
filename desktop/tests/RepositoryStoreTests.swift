@@ -53,6 +53,236 @@ struct RepositoryStoreTests {
     static func process(_ store: RepositoryStore) throws -> [String: Any] { try store.handle(method: "processQueue") }
     static func status(_ result: [String: Any]) -> [String: Any] { result["status"] as! [String: Any] }
 
+    static func deletionTests(_ root: URL) throws {
+        let source = root.appendingPathComponent("deletion-source"), remote = root.appendingPathComponent("deletion-remote.git")
+        let app = root.appendingPathComponent("deletion-data")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try git(["init", "-b", "main"], at: source)
+        try git(["config", "user.name", identity.name], at: source); try git(["config", "user.email", identity.email], at: source)
+        let path = "_docs/Notes/北京.md", other = "_docs/other.md", wildcard = "_docs/a*[bc].md", neighbor = "_docs/abc.md"
+        let original = raw("Delete me", body: "Published article"), draft = raw("Delete me", body: "Unpublished changes that must survive cancellation")
+        try write(original, path, at: source); try write(raw("Other", body: "Keep this"), other, at: source)
+        try write(raw("Literal wildcard", body: "Only erase this exact path"), wildcard, at: source)
+        try write(raw("Matching neighbor", body: "Keep this exact source"), neighbor, at: source)
+        try write("---\ntitle: Home\n---\nHome", "index.md", at: source)
+        try write("---\ntitle: Missing\npermalink: /404.html\n---\nMissing", "404.md", at: source)
+        try write("---\ntitle: Admin\npermalink: /admin/\n---\nCMS", "admin/index.md", at: source)
+        try write("---\npermalink: /search/\n---\n{% for doc in site.docs %}{{ doc.title }}{% endfor %}", "search.html", at: source)
+        try write("---\ntitle: Changes\n---\n{% include changes.html %}", "changelog.html", at: source)
+        try write("shared-image-bytes", "images/shared.png", at: source); try write("keep bytes", "unrelated.txt", at: source)
+        try git(["add", "."], at: source); try git(["commit", "-m", "Deletion fixture"], at: source)
+        try git(["clone", "--bare", source.path, remote.path]); try git(["remote", "add", "origin", remote.path], at: source)
+        let initialCommit = try git(["rev-parse", "main"], at: remote).trimmingCharacters(in: .whitespacesAndNewlines)
+        var captured: [String: Any] = [:], blockValidation = false, race = false
+        let validator: ([String: Any]) throws -> [String: Any] = { request in
+            captured = request
+            if race {
+                race = false
+                try git(["pull", "--ff-only", "origin", "main"], at: source)
+                try write("A competing remote update", "unrelated.txt", at: source)
+                try git(["add", "unrelated.txt"], at: source); try git(["commit", "-m", "Competing remote edit"], at: source)
+                try git(["push", "origin", "main"], at: source)
+            }
+            return ["ok": !blockValidation, "issues": blockValidation ? [["severity": "error", "code": "link.missing", "path": other, "message": "Remaining article links to deleted source"]] : []]
+        }
+        let store = RepositoryStore(root: app, remoteURL: remote.path, seedRepo: source, identity: identity, validation: validator)
+        _ = try store.handle(method: "bootstrap")
+        func rows(_ snapshot: [String: Any]) -> [[String: Any]] { snapshot["deletions"] as! [[String: Any]] }
+        func revision(_ path: String) throws -> String { try item(store, path)["revision"] as! String }
+        func hide(_ path: String) throws -> [String: Any] {
+            try store.handle(method: "removeLocally", params: ["path": path, "expectedRevision": revision(path), "confirmation": "REMOVE", "title": "A removed title"])
+        }
+        func plan(_ path: String, _ snapshot: [String: Any]) throws -> [String: Any] {
+            let row = rows(snapshot).first { $0["path"] as? String == path }!
+            return try store.handle(method: "prepareDeletion", params: ["path": path, "expectedRevision": row["expectedRevision"]!])
+        }
+        func confirm(_ report: [String: Any]) throws -> [String: Any] {
+            try store.handle(method: "deleteArticle", params: ["path": report["path"]!, "scope": "published", "expectedRevision": report["expectedRevision"]!, "expectedRemoteBlob": report["expectedRemoteBlob"]!, "confirmation": "DELETE"])
+        }
+        try rejects("First removal requires explicit REMOVE") { _ = try store.handle(method: "removeLocally", params: ["path": path, "expectedRevision": revision(path)]) }
+        try rejects("GitHub deletion cannot bypass first local removal") { _ = try store.handle(method: "deleteArticle", params: ["path": path, "scope": "published", "expectedRevision": revision(path), "expectedRemoteBlob": "", "confirmation": "DELETE"]) }
+        try save(store, path, draft); try queue(store, path)
+        try rejects("Queued source cannot be locally removed") { _ = try hide(path) }
+        _ = try store.handle(method: "cancelQueued", params: ["path": path])
+        let beforeRemoval = try revision(path)
+        let hidden = try hide(path)
+        try expect(!all(hidden).contains { $0["path"] as? String == path }, "First confirmation hides the article locally")
+        try expect(rows(hidden).first?["status"] as? String == "local", "Hidden published article must await a separate remote decision")
+        try expect(try git(["rev-parse", "main"], at: remote).trimmingCharacters(in: .whitespacesAndNewlines) == initialCommit, "First confirmation must not change GitHub")
+        try rejects("Hidden article cannot be saved by a stale editor") { _ = try store.handle(method: "saveDraft", params: ["path": path, "expectedRevision": beforeRemoval, "rawContent": original]) }
+        try rejects("Hidden article cannot be queued directly") { try queue(store, path) }
+        let hiddenBackup = try store.exportBackup()
+        let hiddenRestart = RepositoryStore(root: app, remoteURL: remote.path, identity: identity, validation: validator)
+        try expect(!all(try hiddenRestart.handle(method: "refresh")).contains { $0["path"] as? String == path }, "Local removal survives refresh and restart")
+        let restored = try hiddenRestart.handle(method: "restoreLocalRemoval", params: ["path": path])
+        try expect(all(restored).first { $0["path"] as? String == path }?["rawContent"] as? String == draft, "Restore locally recovers exact unpublished draft")
+        // Keep one store authoritative for the remaining checks.
+        _ = try store.handle(method: "restoreLocalRemoval", params: ["path": path])
+        let stateFile = app.appendingPathComponent("state.json"), savedState = app.appendingPathComponent("held-state.json")
+        try fm.moveItem(at: stateFile, to: savedState); try fm.createDirectory(at: stateFile, withIntermediateDirectories: false)
+        try rejects("Local removal must abort on atomic storage failure") { _ = try hide(path) }
+        try fm.removeItem(at: stateFile); try fm.moveItem(at: savedState, to: stateFile)
+        try expect(try item(store, path)["rawContent"] as? String == draft, "Failed removal keeps unpublished content intact")
+        try expect(rows(try store.handle(method: "bootstrap")).isEmpty, "Failed removal does not hide the article")
+        let unrelatedQueue = "_docs/unrelated-queued.md"
+        _ = try store.handle(method: "createArticle", params: ["path": unrelatedQueue, "rawContent": raw("Queued", body: "Must not publish during deletion")])
+        try queue(store, unrelatedQueue)
+        let hiddenAgain = try hide(path)
+        let ownRemovalImport = try store.restoreBackup(hiddenBackup)
+        try expect(rows(ownRemovalImport).first { $0["path"] as? String == path }?["status"] as? String == "local", "Backup import preserves an existing local removal")
+        let staleLocalPlan = try store.handle(method: "prepareDeletion", params: ["path": path, "expectedRevision": "stale"])
+        try expect(staleLocalPlan["canDelete"] as? Bool == false, "Stale source revision cannot approve deletion")
+        let reviewed = try plan(path, hiddenAgain)
+        try expect(reviewed["canDelete"] as? Bool == true, "Valid remaining sources permit deletion review")
+        try expect(reviewed["snapshot"] is [String: Any], "Deletion review returns the refreshed library snapshot")
+        let documentPaths = (captured["documents"] as! [[String: String]]).map { $0["path"]! }
+        try expect(documentPaths.contains("admin/index.md") && documentPaths.contains(other), "Validation includes all remaining authored sources including admin")
+        try expect(!documentPaths.contains(path) && !documentPaths.contains("search.html") && !documentPaths.contains("changelog.html"), "Deleted source and Liquid templates must not be validated as authored documents")
+        try expect((captured["files"] as! [String]).contains("images/shared.png") && !(captured["files"] as! [String]).contains(path), "Validation retains shared assets and excludes erased source")
+        try expect((captured["routes"] as! [String]).contains("/search/") && !(captured["routes"] as! [String]).contains("/Notes/北京/"), "Routes include remaining templates and exclude deleted article")
+        try rejects("Second confirmation is mandatory") { _ = try store.handle(method: "deleteArticle", params: reviewed) }
+        blockValidation = true
+        let blocked = try confirm(reviewed)
+        try expect((blocked["deletion"] as! [String: Any])["status"] as? String == "failed", "Remaining-source errors block deletion again at confirmation")
+        try expect(rows(blocked).first?["status"] as? String == "local", "Blocked deletion remains available for local restore or renewed review")
+        blockValidation = false
+        let beforeFailedPush = try git(["rev-parse", "main"], at: remote)
+        try fm.moveItem(at: stateFile, to: savedState); try fm.createDirectory(at: stateFile, withIntermediateDirectories: false)
+        let storageBlocked = try confirm(reviewed)
+        try fm.removeItem(at: stateFile); try fm.moveItem(at: savedState, to: stateFile)
+        try expect((storageBlocked["deletion"] as! [String: Any])["status"] as? String == "failed", "Failed intent persistence returns a fresh blocked snapshot")
+        try expect(try git(["rev-parse", "main"], at: remote) == beforeFailedPush, "Intent persistence failure must prevent the remote push")
+        try expect(rows(storageBlocked).first { $0["path"] as? String == path }?["status"] as? String == "local", "Failed intent persistence retains local removal and its restoration path")
+        let wrongBlob = try store.handle(method: "deleteArticle", params: ["path": path, "scope": "published", "expectedRevision": reviewed["expectedRevision"]!, "expectedRemoteBlob": "old-blob", "confirmation": "DELETE"])
+        try expect((wrongBlob["deletion"] as! [String: Any])["status"] as? String == "failed", "Stale remote blob token cannot approve deletion")
+        // CMS edits invalidate both the captured remote blob and the reviewed source token.
+        try write(raw("Delete me", body: "CMS version"), path, at: source)
+        try write(raw("Other", body: "CMS changed selected next article"), other, at: source)
+        try git(["add", path, other], at: source); try git(["commit", "-m", "CMS edits"], at: source); try git(["push", "origin", "main"], at: source)
+        let stale = try plan(path, hiddenAgain)
+        try expect(stale["canDelete"] as? Bool == false && stale["canReviewLatest"] as? Bool == true, "Remote edit requires an explicit renewed review")
+        try expect(all(stale["snapshot"] as! [String: Any]).first { $0["path"] as? String == other }?["rawContent"] as? String == raw("Other", body: "CMS changed selected next article"), "Review snapshot refreshes other article revisions for safe cancellation")
+        let renewed = try store.handle(method: "prepareDeletion", params: ["path": path, "expectedRevision": stale["latestRevision"]!, "renewReview": true])
+        try expect(renewed["canDelete"] as? Bool == true && renewed["expectedRevision"] as? String == stale["latestRevision"] as? String, "Renewal binds confirmation to the acknowledged latest source")
+        let removed = try confirm(renewed)
+        let deletion = (removed["deletion"] as! [String: Any]), row = rows(removed).first!
+        try expect(deletion["status"] as? String == "uploaded", "Successful second confirmation uploads one deletion")
+        try expect(row["rawContent"] == nil && row["draft"] == nil, "Deletion status and deployment targets must not expose retained drafts")
+        try expect(try item(store, unrelatedQueue)["isQueued"] as? Bool == true, "Deletion must preserve unrelated queued publication")
+        try rejects("Deleting another source must not process unrelated queued articles") { _ = try git(["show", "main:\(unrelatedQueue)"], at: remote) }
+        _ = try store.handle(method: "cancelQueued", params: ["path": unrelatedQueue])
+        try rejects("The selected article must be absent from Git main") { _ = try git(["show", "main:\(path)"], at: remote) }
+        try expect(try git(["show", "main:images/shared.png"], at: remote) == "shared-image-bytes", "Deletion must not remove shared images")
+        try expect(try git(["show", "main:unrelated.txt"], at: remote) == "keep bytes", "Deletion must not include unrelated local changes")
+        let history = try store.handle(method: "listHistory", params: ["path": path])["entries"] as! [[String: Any]]
+        var historicalContents: [String] = []
+        for entry in history { historicalContents.append(try store.handle(method: "readHistory", params: ["path": path, "id": entry["id"]!])["rawContent"] as! String) }
+        try expect(historicalContents.contains(draft) && historicalContents.contains(original), "Deleted source and unpublished content remain recoverable")
+        let targets = try store.deploymentTargets()["targets"] as! [[String: Any]]
+        try expect(targets.filter { $0["path"] as? String == path }.count == 1 && targets.first { $0["path"] as? String == path }?["operation"] as? String == "delete", "Removed paths only create deletion deployment targets")
+        var candidate = row; candidate["status"] = "deleted"; candidate["manifestCommit"] = initialCommit
+        var polled = try store.applyDeploymentStatus(["results": [candidate]])
+        try expect(rows(polled).first?["status"] as? String == "uploaded", "An old manifest cannot falsely verify website deletion")
+        candidate["manifestCommit"] = row["commit"]
+        polled = try store.applyDeploymentStatus(["results": [candidate]])
+        try expect(rows(polled).first?["status"] as? String == "deleted", "Manifest at known deletion commit verifies website removal")
+        var stalePublication = row; stalePublication.removeValue(forKey: "operation"); stalePublication["status"] = "live"
+        polled = try store.applyDeploymentStatus(["results": [stalePublication]])
+        try expect(!(polled["publications"] as! [[String: Any]]).contains { $0["path"] as? String == path }, "Stale ordinary publication reports cannot resurrect deleted targets")
+        // Imported removal/deletion metadata is inert; unpublished held source is history only.
+        let recipient = RepositoryStore(root: root.appendingPathComponent("deletion-import"), remoteURL: remote.path, identity: identity)
+        let imported = try recipient.restoreBackup(hiddenBackup)
+        try expect(rows(imported).isEmpty && !(try recipient.deploymentTargets()["targets"] as! [[String: Any]]).contains { $0["operation"] as? String == "delete" }, "Backup import never activates local removals or remote deletion intents")
+        try expect(!(try recipient.handle(method: "listHistory", params: ["path": path])["entries"] as! [[String: Any]]).isEmpty, "Imported unpublished removed draft is preserved in history")
+        // Root pages are deletable with the same second gate, without phantom root routes.
+        let hiddenHome = try hide("index.md"), homePlan = try plan("index.md", hiddenHome)
+        try expect(!(captured["routes"] as! [String]).contains("/"), "Deleting index does not invent a remaining root route")
+        _ = try confirm(homePlan)
+        let hidden404 = try hide("404.md"), missingPlan = try plan("404.md", hidden404)
+        try expect(!(captured["routes"] as! [String]).contains("/404.html"), "Deleting404 does not invent a remaining404 route")
+        _ = try confirm(missingPlan)
+        try rejects("Home source must be erased after second confirmation") { _ = try git(["show", "main:index.md"], at: remote) }
+        try rejects("404 source must be erased after second confirmation") { _ = try git(["show", "main:404.md"], at: remote) }
+        let hiddenWildcard = try hide(wildcard), wildcardPlan = try plan(wildcard, hiddenWildcard)
+        _ = try confirm(wildcardPlan)
+        try rejects("Literal wildcard and bracket source must be removed") { _ = try git(["cat-file", "-e", "main:\(wildcard)"], at: remote) }
+        try expect(try git(["show", "main:\(neighbor)"], at: remote) == raw("Matching neighbor", body: "Keep this exact source"), "Git pathspec characters must not delete a matching neighbor")
+        // Competing remote commit wins safely: no force, no auto-retry, local removal retained.
+        let hiddenOther = try hide(other), otherPlan = try plan(other, hiddenOther)
+        race = true
+        let raced = try confirm(otherPlan)
+        try expect((raced["deletion"] as! [String: Any])["status"] as? String == "failed", "A non-fast-forward push must be a rejected deletion")
+        try expect(rows(raced).first { $0["path"] as? String == other }?["status"] as? String == "local", "Rejected deletion remains restorable and reviewable")
+        try expect(try git(["show", "main:\(other)"], at: remote).contains("CMS changed"), "A competing push preserves the source")
+        let remoteAfterRace = try git(["rev-parse", "main"], at: remote)
+        _ = try process(store)
+        try expect(try git(["rev-parse", "main"], at: remote) == remoteAfterRace, "Queue processing never retries deletion")
+        // Offline first-stage removal works, while remote erasure remains blocked.
+        let localPath = "_docs/offline.md"
+        _ = try store.handle(method: "createArticle", params: ["path": localPath, "rawContent": raw("Offline", body: "Local only")])
+        let movedRemote = root.appendingPathComponent("offline-deletion-remote.git")
+        try fm.moveItem(at: remote, to: movedRemote)
+        let localRemoved = try hide(localPath)
+        try expect((localRemoved["localRemoval"] as! [String: Any])["scope"] as? String == "local", "Offline local-only draft removal never needs GitHub")
+        let offlinePlan = try plan(other, raced)
+        try expect(offlinePlan["canDelete"] as? Bool == false, "Offline GitHub deletion is blocked rather than queued")
+        try fm.moveItem(at: movedRemote, to: remote)
+        _ = try store.handle(method: "restoreLocalRemoval", params: ["path": other])
+        // A durable intent models a crash after push. Fetch/disk failure cannot lose it or retry it.
+        let intentHidden = try hide(other), intentRow = rows(intentHidden).first { $0["path"] as? String == other }!
+        let parent = try git(["rev-parse", "main"], at: remote).trimmingCharacters(in: .whitespacesAndNewlines)
+        try git(["pull", "--ff-only", "origin", "main"], at: source); try git(["rm", "--", other], at: source)
+        try git(["commit", "-m", "Simulated confirmed deletion before app crash"], at: source)
+        let plannedCommit = try git(["rev-parse", "HEAD"], at: source).trimmingCharacters(in: .whitespacesAndNewlines)
+        let privateRef = "refs/nightingale/deletions/test-intent"
+        try git(["fetch", source.path, "HEAD:\(privateRef)"], at: app.appendingPathComponent("repository.git"))
+        var stateJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: stateFile)) as! [String: Any]
+        stateJSON["deletionIntents"] = [other: ["commit": plannedCommit, "parentCommit": parent, "sourceSHA256": intentRow["sourceSHA256"]!, "expectedRevision": intentRow["expectedRevision"]!, "remoteBlob": intentRow["expectedRemoteBlob"]!, "liveURL": intentRow["liveURL"]!, "createdAt": "2026-11-02T00:00:00Z", "retainedRef": privateRef]]
+        try JSONSerialization.data(withJSONObject: stateJSON).write(to: stateFile, options: .atomic)
+        let pending = RepositoryStore(root: app, remoteURL: remote.path, identity: identity, validation: validator)
+        let pendingSnapshot = try pending.handle(method: "bootstrap")
+        try expect(rows(pendingSnapshot).first { $0["path"] as? String == other }?["status"] as? String == "unknown", "Unresolved intent stays unknown before ancestry confirmation")
+        _ = try process(pending)
+        try expect(try git(["rev-parse", "main"], at: remote).trimmingCharacters(in: .whitespacesAndNewlines) == parent, "Relaunch and queue processing cannot execute a durable intent")
+        var falseUpload = rows(pendingSnapshot).first { $0["path"] as? String == other }!; falseUpload["status"] = "uploaded"
+        let stillUnknown = try pending.applyDeploymentStatus(["results": [falseUpload]])
+        try expect(rows(stillUnknown).first { $0["path"] as? String == other }?["status"] as? String == "unknown", "Deployment polling alone cannot settle an ambiguous Git push")
+        // Explicit retry is safe even after a timeout: it publishes exactly the retained commit.
+        let retryRemote = root.appendingPathComponent("retry-deletion-remote.git"), retryApp = root.appendingPathComponent("retry-deletion-data")
+        try fm.copyItem(at: remote, to: retryRemote); try fm.copyItem(at: app, to: retryApp)
+        try git(["remote", "set-url", "origin", retryRemote.path], at: retryApp.appendingPathComponent("repository.git"))
+        let retryStore = RepositoryStore(root: retryApp, remoteURL: retryRemote.path, identity: identity, validation: validator)
+        let retryReview = try retryStore.handle(method: "prepareDeletion", params: ["path": other, "expectedRevision": intentRow["expectedRevision"]!])
+        try expect(retryReview["canDelete"] as? Bool == true && retryReview["retrying"] as? Bool == true, "Explicit retry review permits the unchanged original parent and blob")
+        let retryResult = try retryStore.handle(method: "deleteArticle", params: ["path": other, "scope": "published", "expectedRevision": retryReview["expectedRevision"]!, "expectedRemoteBlob": retryReview["expectedRemoteBlob"]!, "confirmation": "DELETE"])
+        try expect((retryResult["deletion"] as! [String: Any])["commit"] as? String == plannedCommit, "Explicit retry must reuse the persisted commit identity")
+        try expect(try git(["rev-parse", "main"], at: retryRemote).trimmingCharacters(in: .whitespacesAndNewlines) == plannedCommit, "Retry pushes exactly the original planned deletion")
+        try expect(try git(["rev-parse", "main"], at: remote).trimmingCharacters(in: .whitespacesAndNewlines) == parent, "Retry fixture cannot alter the independent crash-recovery remote")
+        try git(["push", "origin", "main"], at: source)
+        try fm.moveItem(at: stateFile, to: savedState); try fm.createDirectory(at: stateFile, withIntermediateDirectories: false)
+        try rejects("Post-push reconciliation storage failure must be reported") { _ = try pending.handle(method: "refresh") }
+        try fm.removeItem(at: stateFile); try fm.moveItem(at: savedState, to: stateFile)
+        let recovered = RepositoryStore(root: app, remoteURL: remote.path, identity: identity, validation: validator)
+        let settled = try recovered.handle(method: "bootstrap")
+        try expect(rows(settled).first { $0["path"] as? String == other }?["status"] as? String == "uploaded", "Relaunch reconciles already pushed deletion through cached commit ancestry")
+        try expect(!all(settled).contains { $0["path"] as? String == other }, "Post-push recovery cannot recreate erased source from stale cache")
+        let deletionBackup = try recovered.exportBackup()
+        let cleanRecipient = RepositoryStore(root: root.appendingPathComponent("tombstone-import"), remoteURL: remote.path, identity: identity)
+        try expect(rows(try cleanRecipient.restoreBackup(deletionBackup)).isEmpty, "Imported deletion records never become active monitoring or execution state")
+        // A newer known descendant manifest also verifies removal; a random unknown SHA does not.
+        try write("New deployment", "unrelated.txt", at: source); try git(["add", "unrelated.txt"], at: source)
+        try git(["commit", "-m", "Newer deployment"], at: source); try git(["push", "origin", "main"], at: source)
+        let later = try recovered.handle(method: "refresh")
+        var laterCandidate = rows(later).first { $0["path"] as? String == other }!; laterCandidate["status"] = "deleted"; laterCandidate["manifestCommit"] = String(repeating: "a", count: 40)
+        try expect(rows(try recovered.applyDeploymentStatus(["results": [laterCandidate]])).first { $0["path"] as? String == other }?["status"] as? String == "uploaded", "Unknown manifest SHA cannot prove removal")
+        laterCandidate["manifestCommit"] = try git(["rev-parse", "HEAD"], at: source).trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(rows(try recovered.applyDeploymentStatus(["results": [laterCandidate]])).first { $0["path"] as? String == other }?["status"] as? String == "deleted", "Known descendant manifest verifies removal")
+        try write(raw("Recreated", body: "Deliberately recreated in CMS"), other, at: source)
+        try git(["add", other], at: source); try git(["commit", "-m", "Recreate article"], at: source); try git(["push", "origin", "main"], at: source)
+        let recreated = try recovered.handle(method: "refresh")
+        try expect(all(recreated).contains { $0["path"] as? String == other } && !rows(recreated).contains { $0["path"] as? String == other }, "Intentional external recreation clears old deletion status")
+    }
+
     static func main() throws {
         let root = fm.temporaryDirectory.appendingPathComponent("nightingale-store-tests-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -401,7 +631,7 @@ struct RepositoryStoreTests {
         try expect((recoveryBootstrap["recovery"] as! [String: Any])["needsRestore"] as? Bool == true, "Corrupt storage must enter explicit recovery mode")
         try expect(!all(recoveryBootstrap).isEmpty, "Published library must remain readable during recovery")
         try expect(try Data(contentsOf: corruptFile) == corruptBytes, "Bootstrap must preserve corrupt bytes exactly")
-        for method in ["createCategory", "createArticle", "processQueue", "refresh", "discardDraft", "restoreHistory", "importImage", "renameCategory", "mergeCategory", "saveTemplate", "removeTemplate"] {
+        for method in ["createCategory", "createArticle", "processQueue", "refresh", "discardDraft", "restoreHistory", "importImage", "renameCategory", "mergeCategory", "saveTemplate", "removeTemplate", "removeLocally", "restoreLocalRemoval", "prepareDeletion", "deleteArticle"] {
             try rejects("Recovery must block mutation: \(method)") { _ = try recoveringStore.handle(method: method) }
         }
         try rejects("Recovery export must not produce a misleading empty backup") { _ = try recoveringStore.exportBackup() }
@@ -556,7 +786,9 @@ struct RepositoryStoreTests {
             try expect(try git(["rev-parse", "main"], at: remote) == unchangedRemote, "Template management and import must never publish")
         }
 
+        try deletionTests(root)
+
         print("RepositoryStore integration tests passed: \(assertions) assertions")
-        print("Covered offline drafts and snapshots, conflicts, assets and paths, state migration, bounded history, safe backup import/export, automatic backups, publication verification, publish-time validation, atomic category management, and reusable local templates.")
+        print("Covered offline drafts and snapshots, conflicts, assets and paths, state migration, bounded history, safe backup import/export, automatic backups, publication verification, publish-time validation, atomic category management, reusable local templates, two-stage removal, and crash-safe explicit GitHub deletion.")
     }
 }

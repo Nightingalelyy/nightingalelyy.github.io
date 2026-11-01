@@ -180,7 +180,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             }
             return
         }
-        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "renameCategory", "mergeCategory", "listTemplates", "saveTemplate", "removeTemplate", "refresh", "queuePublish", "processQueue", "resolveConflict", "readAsset", "cancelQueued", "discardDraft", "validatePublication", "listHistory", "readHistory", "restoreHistory"]
+        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "renameCategory", "mergeCategory", "listTemplates", "saveTemplate", "removeTemplate", "refresh", "queuePublish", "processQueue", "resolveConflict", "readAsset", "cancelQueued", "discardDraft", "validatePublication", "listHistory", "readHistory", "restoreHistory", "removeLocally", "restoreLocalRemoval", "prepareDeletion", "deleteArticle"]
         guard allowed.contains(method) else { respond(id, error: "Unknown operation."); return }
         worker.async { [weak self] in
             guard let self = self else { return }
