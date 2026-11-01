@@ -16,11 +16,11 @@ fs.mkdirSync(path.join(resources, 'web'), { recursive: true });
 fs.mkdirSync(path.join(root, '.build', 'module-cache'), { recursive: true });
 const nativeSnapshot = path.join(root, '.build', 'native-source');
 fs.mkdirSync(nativeSnapshot, { recursive: true });
-const nativeSources = ['Main.swift', 'RepositoryStore.swift', 'CodeHighlighter.swift', 'PublishingValidator.swift', 'DeploymentClient.swift'];
+const nativeSources = ['Main.swift', 'RepositoryStore.swift', 'CodeHighlighter.swift', 'PublishingValidator.swift', 'DeploymentClient.swift', 'MediaProcessor.swift'];
 for (const file of nativeSources) fs.copyFileSync(path.join(root, 'native', file), path.join(nativeSnapshot, file));
 buildSitePreview(path.join(resources, 'web'));
 await build({ entryPoints: [path.join(root, 'web/app.js')], bundle: true, format: 'iife', target: 'safari16', outfile: path.join(resources, 'web/app.js'), minify: true, sourcemap: false, logLevel: 'info' });
-fs.copyFileSync(path.join(root, 'web/styles.css'), path.join(resources, 'web/styles.css'));
+for (const css of ['styles.css', 'writing-tools.css', 'management.css']) fs.copyFileSync(path.join(root, 'web', css), path.join(resources, 'web', css));
 for (const directory of ['preview', 'vendor/rouge']) {
   const destination = path.join(resources, directory);
   fs.rmSync(destination, { recursive: true, force: true });
@@ -52,8 +52,8 @@ fs.writeFileSync(path.join(app, 'Contents/Info.plist'), `<?xml version="1.0" enc
 <key>CFBundleIdentifier</key><string>io.github.nightingalelyy.writer</string>
 <key>CFBundleExecutable</key><string>NightingaleWriter</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>6</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>7</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>

@@ -401,7 +401,7 @@ struct RepositoryStoreTests {
         try expect((recoveryBootstrap["recovery"] as! [String: Any])["needsRestore"] as? Bool == true, "Corrupt storage must enter explicit recovery mode")
         try expect(!all(recoveryBootstrap).isEmpty, "Published library must remain readable during recovery")
         try expect(try Data(contentsOf: corruptFile) == corruptBytes, "Bootstrap must preserve corrupt bytes exactly")
-        for method in ["createCategory", "createArticle", "processQueue", "refresh", "discardDraft", "restoreHistory", "importImage"] {
+        for method in ["createCategory", "createArticle", "processQueue", "refresh", "discardDraft", "restoreHistory", "importImage", "renameCategory", "mergeCategory", "saveTemplate", "removeTemplate"] {
             try rejects("Recovery must block mutation: \(method)") { _ = try recoveringStore.handle(method: method) }
         }
         try rejects("Recovery export must not produce a misleading empty backup") { _ = try recoveringStore.exportBackup() }
@@ -430,7 +430,133 @@ struct RepositoryStoreTests {
         let recoveredRestart = RepositoryStore(root: corruptRoot, remoteURL: remote.path, identity: identity)
         try expect((try recoveredRestart.handle(method: "bootstrap")["recovery"] as! [String: Any])["needsRestore"] as? Bool == false, "Recovered valid storage must load normally after restart")
 
+        do {
+            // Category changes prepare all rows first, then commit local drafts as one transaction.
+            let managementRoot = root.appendingPathComponent("management-data")
+            let management = RepositoryStore(root: managementRoot, remoteURL: remote.path, seedRepo: source, identity: identity)
+            _ = try management.handle(method: "bootstrap")
+            let secondPath = "_docs/2026-11-02-category-batch.md"
+            _ = try management.handle(method: "createArticle", params: ["path": secondPath, "rawContent": raw("Second", body: "Body and code must not change.\n\n```cpp\nint value = 7;\n```")])
+            let affected = [articlePath, secondPath]
+            func categoryPayload(_ store: RepositoryStore, from: String, to: String) throws -> [String: Any] {
+                let snapshot = try store.handle(method: "bootstrap")
+                let revisions = Dictionary(uniqueKeysWithValues: all(snapshot).map { ($0["path"] as! String, $0["revision"] as! String) })
+                let changes: [[String: Any]] = try affected.map { path in
+                    let article = try item(store, path)
+                    return ["path": path, "expectedRevision": article["revision"]!, "rawContent": (article["rawContent"] as! String).replacingOccurrences(of: "category: \(from)\n", with: "category: \(to)\n")]
+                }
+                return ["from": from, "to": to, "expectedRevisions": revisions, "changes": changes]
+            }
+            let staleBatch = try categoryPayload(management, from: "Articles", to: "Writing")
+            try save(management, "index.md", "---\ntitle: Homepage\n---\nUnrelated newer edit.\n")
+            try rejects("A category batch must guard unrelated library revisions too") { _ = try management.handle(method: "renameCategory", params: staleBatch) }
+            try expect(try item(management, articlePath)["rawContent"] as? String == original, "A stale category batch cannot partially change its first article")
+            var incomplete = try categoryPayload(management, from: "Articles", to: "Writing")
+            var partialRevisions = incomplete["expectedRevisions"] as! [String: String]; partialRevisions.removeValue(forKey: "404.md"); incomplete["expectedRevisions"] = partialRevisions
+            try rejects("The category snapshot must include every library path") { _ = try management.handle(method: "renameCategory", params: incomplete) }
+            var badRow = try categoryPayload(management, from: "Articles", to: "Writing")
+            var badChanges = badRow["changes"] as! [[String: Any]]; badChanges[1]["expectedRevision"] = "stale"; badRow["changes"] = badChanges
+            try rejects("Every affected row must match its saved revision") { _ = try management.handle(method: "renameCategory", params: badRow) }
+            var changedBody = try categoryPayload(management, from: "Articles", to: "Writing")
+            var bodyChanges = changedBody["changes"] as! [[String: Any]]; bodyChanges[0]["rawContent"] = (bodyChanges[0]["rawContent"] as! String) + "Unintended text edit.\n"; changedBody["changes"] = bodyChanges
+            try rejects("Category changes cannot alter body text or code") { _ = try management.handle(method: "renameCategory", params: changedBody) }
+            try queue(management, secondPath)
+            try rejects("Queued affected articles must block the whole category batch") { _ = try management.handle(method: "renameCategory", params: categoryPayload(management, from: "Articles", to: "Writing")) }
+            _ = try management.handle(method: "cancelQueued", params: ["path": secondPath])
+            let beforeCategoryState = try JSONSerialization.jsonObject(with: Data(contentsOf: managementRoot.appendingPathComponent("state.json"))) as! [String: Any]
+            let secondBase = (beforeCategoryState["drafts"] as! [String: Any])[secondPath] as! [String: Any]
+            let unchangedRemote = try git(["rev-parse", "main"], at: remote)
+            let renamed = try management.handle(method: "renameCategory", params: categoryPayload(management, from: "Articles", to: "Writing"))
+            try expect((renamed["categoryChange"] as! [String: Any])["articlesChanged"] as? Int == 2, "Both category rows must change together")
+            for path in affected {
+                try expect((try item(management, path)["rawContent"] as! String).contains("category: Writing\n"), "Renamed articles must remain at their original paths")
+                try expect(try item(management, path)["isDraft"] as? Bool == true, "Category updates must remain local drafts")
+                try expect(try item(management, path)["isQueued"] as? Bool == false, "Category updates must not queue publication")
+            }
+            let afterCategoryState = try JSONSerialization.jsonObject(with: Data(contentsOf: managementRoot.appendingPathComponent("state.json"))) as! [String: Any]
+            let secondAfter = (afterCategoryState["drafts"] as! [String: Any])[secondPath] as! [String: Any]
+            try expect(secondBase["baseBlob"] == nil && secondAfter["baseBlob"] == nil, "An existing new draft must preserve its nil remote base")
+            try expect(try git(["rev-parse", "main"], at: remote) == unchangedRemote, "Category management must never publish")
+            let managementRestart = RepositoryStore(root: managementRoot, remoteURL: remote.path, identity: identity)
+            let restoredManagement = try managementRestart.handle(method: "bootstrap")
+            try expect((restoredManagement["categories"] as! [String]).contains("Writing"), "Renamed local categories must survive restart")
+            _ = try managementRestart.handle(method: "createCategory", params: ["name": "Target"])
+            let mergedCategory = try managementRestart.handle(method: "mergeCategory", params: categoryPayload(managementRestart, from: "Writing", to: "Target"))
+            try expect((mergedCategory["categories"] as! [String]).filter { $0 == "Target" }.count == 1, "Merging must reuse one target category")
+            try expect(!(mergedCategory["categories"] as! [String]).contains("Writing"), "Merging must remove the old explicit category")
+            _ = try managementRestart.handle(method: "createCategory", params: ["name": "Empty"])
+            let emptySnapshot = try managementRestart.handle(method: "bootstrap")
+            let emptyRevisions = Dictionary(uniqueKeysWithValues: all(emptySnapshot).map { ($0["path"] as! String, $0["revision"] as! String) })
+            let emptyRename = try managementRestart.handle(method: "renameCategory", params: ["from": "Empty", "to": "Unused", "expectedRevisions": emptyRevisions, "changes": []])
+            try expect((emptyRename["categories"] as! [String]).contains("Unused"), "An empty local category can be renamed without moving files")
+
+            // A failed disk write rolls back the entire batch and its new history entries.
+            let batchBefore = try item(managementRestart, articlePath)["rawContent"] as! String
+            let batchHistoryCount = (try managementRestart.handle(method: "listHistory")["entries"] as! [[String: Any]]).count
+            let managementState = managementRoot.appendingPathComponent("state.json"), managementSaved = managementRoot.appendingPathComponent("saved-state.json")
+            let failingBatch = try categoryPayload(managementRestart, from: "Target", to: "Atomic")
+            try fm.moveItem(at: managementState, to: managementSaved); try fm.createDirectory(at: managementState, withIntermediateDirectories: false)
+            try rejects("Failed category persistence must abort all changes") { _ = try managementRestart.handle(method: "renameCategory", params: failingBatch) }
+            try fm.removeItem(at: managementState); try fm.moveItem(at: managementSaved, to: managementState)
+            try expect(try item(managementRestart, articlePath)["rawContent"] as? String == batchBefore, "Failed category batch must preserve prior drafts")
+            try expect((try managementRestart.handle(method: "listHistory")["entries"] as! [[String: Any]]).count == batchHistoryCount, "Failed category batch must roll back newly created history")
+            var conflictState = try JSONSerialization.jsonObject(with: Data(contentsOf: managementState)) as! [String: Any]
+            conflictState["conflicts"] = [articlePath: ["base": original, "local": batchBefore, "remote": "Unresolved remote edit"]]
+            try JSONSerialization.data(withJSONObject: conflictState).write(to: managementState, options: .atomic)
+            let conflictedManagement = RepositoryStore(root: managementRoot, remoteURL: remote.path, identity: identity)
+            _ = try conflictedManagement.handle(method: "bootstrap")
+            try rejects("Conflicted affected articles must block the category batch") { _ = try conflictedManagement.handle(method: "renameCategory", params: categoryPayload(conflictedManagement, from: "Target", to: "Blocked")) }
+
+            // Templates are local reusable source, survive restart/backups, and never replace collisions.
+            let templatesRoot = root.appendingPathComponent("template-data")
+            let templatesStore = RepositoryStore(root: templatesRoot, remoteURL: remote.path, seedRepo: source, identity: identity)
+            let legacyTemplateBoot = try templatesStore.handle(method: "bootstrap")
+            try expect(legacyTemplateBoot["templates"] as? [[String: String]] == [], "Old storage without templates must load with an empty list")
+            let templateRaw = "---\nauthor: Yuyang Liu\ncategory: Articles\ntags: [notes]\n---\n## Notes\n\n```cpp\n// Code goes here\n```\n"
+            let savedTemplate = try templatesStore.handle(method: "saveTemplate", params: ["name": "  Café notes  ", "rawContent": templateRaw])["template"] as! [String: Any]
+            let templateID = savedTemplate["id"] as! String
+            try expect(savedTemplate["name"] as? String == "Café notes", "Template names must normalize whitespace")
+            try expect(savedTemplate["rawContent"] as? String == templateRaw, "Template source must be preserved exactly")
+            try rejects("Duplicate case-insensitive template names must be rejected") { _ = try templatesStore.handle(method: "saveTemplate", params: ["name": "CAFÉ NOTES", "rawContent": "other"]) }
+            try rejects("Template contents must respect the size limit") { _ = try templatesStore.handle(method: "saveTemplate", params: ["name": "Too big", "rawContent": String(repeating: "x", count: 5 * 1024 * 1024 + 1)]) }
+            try rejects("Template names must reject line breaks") { _ = try templatesStore.handle(method: "saveTemplate", params: ["name": "Bad\nname", "rawContent": "text"]) }
+            let templateBackup = try templatesStore.exportBackup()
+            try expect(try templatesStore.inspectBackup(templateBackup)["templateCount"] as? Int == 1, "Backup inspection must count templates")
+            let templateRestart = RepositoryStore(root: templatesRoot, remoteURL: remote.path, identity: identity)
+            let restoredTemplates = try templateRestart.handle(method: "listTemplates")["templates"] as! [[String: Any]]
+            try expect(restoredTemplates.count == 1 && restoredTemplates[0]["rawContent"] as? String == templateRaw, "Templates must survive relaunch")
+            _ = try templateRestart.handle(method: "saveTemplate", params: ["id": templateID, "name": "Café notes", "rawContent": "A newer local template"])
+            _ = try templateRestart.restoreBackup(templateBackup)
+            let collisionTemplates = try templateRestart.handle(method: "listTemplates")["templates"] as! [[String: Any]]
+            try expect(collisionTemplates.count == 2, "Conflicting backup templates must be recovered separately")
+            try expect(collisionTemplates.first { $0["id"] as? String == templateID }?["rawContent"] as? String == "A newer local template", "Import cannot overwrite an existing template")
+            try expect(collisionTemplates.contains { $0["rawContent"] as? String == templateRaw }, "Imported conflicting template source must remain available")
+            _ = try templateRestart.restoreBackup(templateBackup)
+            try expect((try templateRestart.handle(method: "listTemplates")["templates"] as! [[String: Any]]).count == 2, "Repeated backup import must deduplicate recovered templates")
+            let recoveredTemplateID = collisionTemplates.first { $0["id"] as? String != templateID }!["id"] as! String
+            _ = try templateRestart.handle(method: "saveTemplate", params: ["id": recoveredTemplateID, "name": "Renamed recovered template", "rawContent": templateRaw])
+            _ = try templateRestart.restoreBackup(templateBackup)
+            try expect((try templateRestart.handle(method: "listTemplates")["templates"] as! [[String: Any]]).count == 2, "Renaming a recovered template must retain its import lineage for deduplication")
+            var oversizedTemplateBackup = try JSONSerialization.jsonObject(with: templateBackup) as! [String: Any]
+            var oversizedTemplateState = oversizedTemplateBackup["state"] as! [String: Any]
+            var oversizedTemplates = oversizedTemplateState["templates"] as! [String: Any]
+            var oversizedEntry = oversizedTemplates[templateID] as! [String: Any]
+            oversizedEntry["rawContent"] = String(repeating: "x", count: 5 * 1024 * 1024 + 1)
+            oversizedTemplates[templateID] = oversizedEntry; oversizedTemplateState["templates"] = oversizedTemplates; oversizedTemplateBackup["state"] = oversizedTemplateState
+            try rejects("Backup template contents must obey the same5MiB limit") { _ = try templateRestart.inspectBackup(JSONSerialization.data(withJSONObject: oversizedTemplateBackup)) }
+            _ = try templateRestart.handle(method: "removeTemplate", params: ["id": templateID])
+            try expect((try templateRestart.handle(method: "listTemplates")["templates"] as! [[String: Any]]).count == 1, "Template deletion must remove only the chosen template")
+            try rejects("A deleted template cannot silently reappear from a stale update") { _ = try templateRestart.handle(method: "saveTemplate", params: ["id": templateID, "name": "Old", "rawContent": "old"]) }
+            let limitStore = RepositoryStore(root: root.appendingPathComponent("template-limit-data"), remoteURL: remote.path, seedRepo: source, identity: identity)
+            _ = try limitStore.handle(method: "bootstrap")
+            for index in 0..<100 { _ = try limitStore.handle(method: "saveTemplate", params: ["name": "Starter \(index)", "rawContent": ""]) }
+            try rejects("More than100 templates must be rejected") { _ = try limitStore.handle(method: "saveTemplate", params: ["name": "Overflow", "rawContent": ""]) }
+            try rejects("Backup import cannot exceed the merged template limit") { _ = try limitStore.restoreBackup(templateBackup) }
+            try expect((try limitStore.handle(method: "listTemplates")["templates"] as! [[String: Any]]).count == 100, "Failed template import must leave existing templates intact")
+            try expect(try git(["rev-parse", "main"], at: remote) == unchangedRemote, "Template management and import must never publish")
+        }
+
         print("RepositoryStore integration tests passed: \(assertions) assertions")
-        print("Covered offline drafts and snapshots, conflicts, assets and paths, state migration, bounded history, safe backup import/export, automatic backups, publication verification, and publish-time validation.")
+        print("Covered offline drafts and snapshots, conflicts, assets and paths, state migration, bounded history, safe backup import/export, automatic backups, publication verification, publish-time validation, atomic category management, and reusable local templates.")
     }
 }

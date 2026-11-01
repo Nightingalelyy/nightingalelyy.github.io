@@ -1,6 +1,6 @@
 {
   "name": "nightingale-writer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Offline macOS editor for Yuyang Liu's personal site",
@@ -12,6 +12,7 @@
     "@codemirror/commands": "6.11.1",
     "@codemirror/lang-markdown": "6.5.2",
     "@codemirror/language": "6.13.1",
+    "@codemirror/search": "6.7.2",
     "@codemirror/state": "6.7.6",
     "@codemirror/view": "6.43.15",
     "dompurify": "3.4.17",

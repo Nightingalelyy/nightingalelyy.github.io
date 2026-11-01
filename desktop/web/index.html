@@ -6,6 +6,8 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; frame-src 'self' about:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <title>Nightingale Writer</title>
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./writing-tools.css" />
+    <link rel="stylesheet" href="./management.css" />
     <script defer src="./app.js"></script>
   </head>
   <body>
@@ -33,6 +35,8 @@
           <div class="sidebar-bottom">
             <button id="global-history-button" class="sidebar-action"><span data-icon="clock"></span>History &amp; recovery</button>
             <button id="backups-button" class="sidebar-action"><span data-icon="laptop"></span>Backups</button>
+            <button id="manage-categories-button" class="sidebar-action"><span data-icon="folder"></span>Manage categories</button>
+            <button id="templates-button" class="sidebar-action"><span data-icon="page"></span>Templates</button>
             <a href="https://app.pagescms.org/Nightingalelyy/nightingalelyy.github.io/main" class="external-link"><span data-icon="globe"></span>Open web editor<span data-icon="arrow-up-right"></span></a>
             <div class="local-note"><span data-icon="laptop"></span><span>Your drafts stay on this Mac<br><strong>until you choose Publish.</strong></span></div>
           </div>
@@ -40,7 +44,7 @@
 
         <section class="article-list-panel" aria-label="Articles">
           <div class="list-heading"><h1 id="list-title">All articles</h1><span id="list-count">0</span></div>
-          <label class="search-box"><span data-icon="search"></span><input id="search" type="search" placeholder="Search your writing" aria-label="Search articles" autocomplete="off" /><kbd>⌘F</kbd></label>
+          <label class="search-box"><span data-icon="search"></span><input id="search" type="search" placeholder="Search your writing" aria-label="Search articles" autocomplete="off" /><kbd>⇧⌘F</kbd></label>
           <div id="article-list" role="group" aria-label="Article list"></div>
           <div class="list-footer"><span id="list-caption">Loading your library…</span></div>
         </section>
@@ -75,17 +79,18 @@
                 <datalist id="category-options"></datalist>
                 <button id="details-button" class="button quiet small" aria-expanded="false"><span data-icon="sliders"></span>Details</button>
               </div>
-              <div id="extra-metadata" class="extra-metadata" hidden><label>Author<input id="author-input" type="text" autocomplete="off" /></label><label>Navigation order<input id="order-input" type="number" min="0" step="1" /></label></div>
+              <div id="extra-metadata" class="extra-metadata" hidden><label>Author<input id="author-input" type="text" autocomplete="off" /></label><label>Navigation order<input id="order-input" type="number" min="0" step="1" /></label><label class="tags-field">Tags<input id="tags-input" type="text" placeholder="Comma-separated tags" aria-label="Article tags" autocomplete="off" /></label></div>
             </div>
             <div class="writing-toolbar">
               <div class="segmented-control" role="group" aria-label="Editor view"><button class="active" data-view="write" aria-pressed="true">Write</button><button data-view="split" aria-pressed="false">Split</button><button data-view="preview" aria-pressed="false">Preview</button></div>
-              <div class="writing-tools"><span class="markdown-hint">Markdown</span><button id="image-button" class="button quiet small"><span data-icon="image"></span>Add image</button></div>
+              <div class="writing-tools"><label class="image-option" title="Resize large images to 2400 pixels and compress photos. Animated images stay unchanged."><input id="optimize-images" type="checkbox" checked />Optimize images</label><button id="paste-image-button" class="button quiet small" title="Paste image (⇧⌘V)">Paste image</button><button id="image-button" class="button quiet small"><span data-icon="image"></span>Add image</button></div>
             </div>
             <div id="preview-options" class="preview-options" hidden>
               <span class="preview-caption">Website preview</span>
               <div class="segmented-control preview-devices" role="group" aria-label="Preview device"><button class="active" data-preview-device="desktop" aria-pressed="true">Desktop</button><button data-preview-device="mobile" aria-pressed="false">Mobile</button></div>
               <span id="preview-size-label" class="preview-size-label">Desktop · 800 px article</span>
             </div>
+            <div id="writing-tools-host"></div>
             <div id="writing-area" class="writing-area view-write">
               <div id="code-editor" aria-label="Markdown writing area"></div>
               <section id="preview-scroll" class="site-preview-scroll" aria-label="Website preview viewport" tabindex="0">
@@ -115,6 +120,7 @@
       <form id="new-form">
         <div class="modal-heading"><span class="modal-icon" data-icon="feather"></span><button type="button" class="icon-button" data-close="new-dialog" aria-label="Close new article"><span data-icon="close"></span></button></div>
         <h2>A new article</h2><p class="modal-description">Start writing now. Publish when you’re ready.</p>
+        <div id="new-template-chooser"></div>
         <label>Title<input id="new-title" type="text" placeholder="What’s on your mind?" required maxlength="180" autocomplete="off" /></label>
         <div class="modal-row"><label>Category<input id="new-category" type="text" value="Articles" list="category-options" required autocomplete="off" /></label><label>Date<input id="new-date" type="date" required /></label></div>
         <div id="new-error" class="inline-error" hidden></div>

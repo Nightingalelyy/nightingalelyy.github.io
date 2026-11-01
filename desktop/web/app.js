@@ -1,4 +1,3 @@
-import { stringify } from 'yaml';
 import DOMPurify from 'dompurify';
 import { EditorState, Compartment } from '@codemirror/state';
 import { EditorView, keymap, placeholder, drawSelection, highlightActiveLine } from '@codemirror/view';
@@ -9,6 +8,8 @@ import { api } from './api.js';
 import { parseArticle, editorFields, serializeArticle, normalizeDateForInput } from './content.js';
 import { renderMarkdownPreview, codeHighlightKey, planCodeHighlights, applyCodeHighlightResults } from './markdown.js';
 import { publicationView, mergePublicationRecords, validationSummary, issueLocation, compareHistoryVersions, safeExternalURL, workspaceRecovery } from './workflow.js';
+import { installWritingTools } from './writing-tools.js';
+import { installManagement } from './management.js';
 
 const $ = (selector) => document.querySelector(selector);
 const icons = {
@@ -46,6 +47,9 @@ const recovery = { history: null, historyGeneration: 0, validation: null, backup
 let publicationPollInFlight = false;
 let publicationPollAt = 0;
 let editor;
+let writingTools;
+let management;
+let mediaBusy = false;
 let autosaveTimer;
 let previewTimer;
 let previewVersion = 0;
@@ -86,6 +90,7 @@ function currentRaw() {
     fields.date = $('#date-input').value;
     fields.category = $('#category-input').value;
     fields.order = $('#order-input').value;
+    fields.tags = $('#tags-input').value;
   }
   return serializeArticle(state.parsed, fields, editor.state.sliceDoc(), state.initialFields);
 }
@@ -144,6 +149,8 @@ function applyWorkspaceAccess() {
   document.querySelectorAll('[data-filter="drafts"], [data-filter="queued"]').forEach((button) => { button.disabled = state.recoveryMode; });
   document.querySelectorAll('#document input').forEach((input) => { input.disabled = readOnly; });
   editor?.dispatch({ effects: editable.reconfigure([EditorView.editable.of(!readOnly), EditorState.readOnly.of(readOnly)]) });
+  writingTools?.refresh();
+  for (const id of ['manage-categories-button', 'templates-button', 'paste-image-button']) $(`#${id}`).disabled = readOnly || state.busy || state.publishing || !state.ready;
 }
 function applyPublicationSnapshot(snapshot) {
   const patches = new Map();
@@ -291,9 +298,11 @@ function loadDocument(item) {
   $('#category-input').value = fields.category || '';
   $('#author-input').value = fields.author || '';
   $('#order-input').value = fields.order || '';
+  $('#tags-input').value = fields.tags || '';
   $('#article-metadata').hidden = !item.path.startsWith('_docs/');
   $('#extra-metadata').hidden = true;
   $('#details-button').setAttribute('aria-expanded', 'false');
+  writingTools?.destroy();
   editor?.destroy();
   editor = new EditorView({
     parent: $('#code-editor'),
@@ -308,9 +317,24 @@ function loadDocument(item) {
         editable.of([EditorView.editable.of(!state.transitioning && !state.recoveryMode), EditorState.readOnly.of(state.transitioning || state.recoveryMode)]),
         keymap.of([{ key: 'Mod-s', run: () => { saveCurrent().catch(showError); return true; } }, indentWithTab, ...defaultKeymap, ...historyKeymap]),
         EditorView.updateListener.of((update) => { if (update.docChanged) onEdit(); }),
+        EditorView.domEventHandlers({ paste(event) {
+          const file = [...(event.clipboardData?.files || [])].find((item) => item.type.startsWith('image/'));
+          if (!file || !canEditContent()) return false;
+          event.preventDefault();
+          void insertImage(async () => {
+            if (file.size > 20 * 1024 * 1024) throw new Error('Choose an image smaller than 20 MB.');
+            const encoded = await new Promise((resolve, reject) => {
+              const reader = new FileReader(); reader.onerror = () => reject(new Error('The pasted image could not be read.'));
+              reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.readAsDataURL(file);
+            });
+            return api.importImage(file.name || 'pasted-image.png', encoded, imageOptions());
+          });
+          return true;
+        } }),
       ],
     }),
   });
+  writingTools = installWritingTools({ editor, container: $('#writing-tools-host'), canEdit: canEditContent, onError: showError });
   $('#empty-state').hidden = true;
   $('#document').hidden = false;
   try { localStorage.setItem('nightingale.selectedPath', item.path); } catch { /* Preference storage is optional. */ }
@@ -375,6 +399,7 @@ function setView(view) {
   $('#writing-area').className = `writing-area view-${view}`;
   $('#document').classList.toggle('mode-preview', view === 'preview');
   $('#preview-options').hidden = view === 'write';
+  $('#writing-tools-host').hidden = view === 'preview';
   document.querySelectorAll('[data-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.view === view);
     button.setAttribute('aria-pressed', String(button.dataset.view === view));
@@ -622,6 +647,7 @@ async function runSync({ publish = false, quiet = false } = {}) {
   finally { state.busy = false; setTransition(false); renderStatus(); renderDocumentStatus(); void pollPublications({ force: true }); }
 }
 async function publishCurrent() {
+  if (state.transitioning || mediaBusy) return;
   if (state.recoveryMode || !state.active || state.busy || state.publishing || state.active.conflict || document.querySelector('dialog[open]')) return;
   const path = state.active.path;
   state.publishing = true;
@@ -865,7 +891,7 @@ async function chooseBackup() {
     recovery.backup = result;
     const summary = result.summary;
     $('#backup-created-at').textContent = `${summary.fileName ? `${summary.fileName} · ` : ''}Created ${savedDate(summary.createdAt)}`;
-    const counts = [['Local drafts', summary.draftCount], ['Queued versions', summary.queuedCount], ['Images', summary.assetCount], ['Categories', summary.categoryCount], ['Saved versions', summary.historyCount]];
+    const counts = [['Local drafts', summary.draftCount], ['Queued versions', summary.queuedCount], ['Images', summary.assetCount], ['Categories', summary.categoryCount], ['Templates', summary.templateCount], ['Saved versions', summary.historyCount]];
     $('#backup-counts').innerHTML = counts.map(([name, count]) => `<div><dt>${name}</dt><dd>${Number(count || 0).toLocaleString()}</dd></div>`).join('');
     const collisions = Number(summary.existingDraftCollisions || 0);
     $('#backup-collisions').textContent = state.recoveryMode ? 'The original unreadable workspace file will be kept in a separate recovery checkpoint. This backup will restore your local workspace.' : collisions ? `${collisions} ${collisions === 1 ? 'article already has' : 'articles already have'} a local draft. Your current drafts will be kept; conflicting imported versions will be available in History & recovery.` : 'Your current local work will be kept. The backup will be merged into this Mac’s library.';
@@ -936,6 +962,10 @@ async function newArticle() {
   $('#new-date').value = today();
   $('#new-error').hidden = true;
   $('#new-dialog').showModal();
+  $('#create-button').disabled = true;
+  try { await management.prepareNewArticle(); }
+  catch (error) { $('#new-error').textContent = error.message || String(error); $('#new-error').hidden = false; }
+  finally { $('#create-button').disabled = false; }
   $('#new-title').focus();
 }
 async function createArticle(event) {
@@ -953,7 +983,7 @@ async function createArticle(event) {
   setTransition(true);
   try {
     await saveCurrent();
-    const rawContent = `---\n${stringify({ title, author: 'Yuyang Liu', date, category, order: 1000 })}---\n\n`;
+    const rawContent = management.newArticleContent({ title, author: 'Yuyang Liu', date, category, order: 1000 });
     const item = await api.create(path, rawContent);
     updateArticle(item);
     state.filter = 'drafts'; state.query = ''; $('#search').value = '';
@@ -964,20 +994,31 @@ async function createArticle(event) {
   } catch (error) { $('#new-error').textContent = error.message || String(error); $('#new-error').hidden = false; }
   finally { $('#create-button').disabled = false; setTransition(false); }
 }
-async function addImage() {
-  if (state.recoveryMode || !state.active) return;
+function canEditContent() { return Boolean(state.active && state.ready && !state.recoveryMode && !state.busy && !state.transitioning && !state.publishing && !mediaBusy); }
+function imageOptions() { return { optimize: $('#optimize-images').checked }; }
+async function insertImage(obtain) {
+  if (!canEditContent() || document.querySelector('dialog[open]')) return;
   const path = state.active.path;
+  const selection = editor.state.selection.main;
+  mediaBusy = true; setTransition(true);
   try {
-    const asset = await api.chooseImage();
+    const asset = await obtain();
     if (!asset || asset.cancelled || !asset.path) return;
     if (asset.base64 && asset.mime) assetCache.set(asset.path, `data:${asset.mime};base64,${asset.base64}`);
     if (path !== state.active?.path) { showToast('Image saved locally. Select the original article to insert it.'); return; }
     const name = asset.path.split('/').pop().replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ').replace(/[\[\]]/g, '');
-    const selection = editor.state.selection.main;
     editor.dispatch({ changes: { from: selection.from, to: selection.to, insert: `![${name}](${asset.path})` } });
+    if (asset.imageInfo) {
+      const info = asset.imageInfo;
+      const saved = Math.max(0, Math.round((1 - info.bytes / info.originalBytes) * 100));
+      showToast(`${info.note} · ${info.width} × ${info.height}${saved ? ` · ${saved}% smaller` : ''}. Image saved on this Mac.`);
+    }
     editor.focus();
   } catch (error) { showError(error); }
+  finally { mediaBusy = false; setTransition(false); }
 }
+function addImage() { return insertImage(() => api.chooseImage(imageOptions())); }
+function pasteImage() { return insertImage(() => api.pasteImage(imageOptions())); }
 async function reviewConflict() {
   if (state.recoveryMode || !state.active?.conflict || state.busy || state.transitioning) return;
   setTransition(true);
@@ -1072,7 +1113,7 @@ $('#article-list').addEventListener('click', (event) => {
   if (button) selectArticle(button.dataset.path);
 });
 $('#search').addEventListener('input', (event) => { state.query = event.target.value.trim(); renderLibrary(); });
-['title-input', 'date-input', 'category-input', 'author-input', 'order-input'].forEach((id) => $(`#${id}`).addEventListener('input', onEdit));
+['title-input', 'date-input', 'category-input', 'author-input', 'order-input', 'tags-input'].forEach((id) => $(`#${id}`).addEventListener('input', onEdit));
 $('#save-button').addEventListener('click', () => saveCurrent().catch(showError));
 $('#publish-button').addEventListener('click', publishCurrent);
 $('#sync-button').addEventListener('click', () => runSync());
@@ -1081,6 +1122,9 @@ $('#add-category-button').addEventListener('click', newCategory);
 $('#category-form').addEventListener('submit', createCategory);
 $('#new-form').addEventListener('submit', createArticle);
 $('#image-button').addEventListener('click', addImage);
+$('#paste-image-button').addEventListener('click', pasteImage);
+$('#manage-categories-button').addEventListener('click', () => management.openCategories(state.filter.startsWith('category:') ? state.filter.slice(9) : undefined));
+$('#templates-button').addEventListener('click', () => management.openTemplates());
 $('#retry-button').addEventListener('click', bootstrap);
 $('#details-button').addEventListener('click', () => { const visible = $('#extra-metadata').hidden; $('#extra-metadata').hidden = !visible; $('#details-button').setAttribute('aria-expanded', String(visible)); });
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => setView(button.dataset.view)));
@@ -1120,13 +1164,19 @@ document.addEventListener('keydown', (event) => {
   if (!(event.metaKey || event.ctrlKey)) return;
   if (event.key.toLowerCase() === 's') { event.preventDefault(); saveCurrent().catch(showError); }
   if (event.key.toLowerCase() === 'n') { event.preventDefault(); newArticle(); }
-  if (event.key.toLowerCase() === 'f') { event.preventDefault(); $('#search').focus(); $('#search').select(); }
+  if (event.key.toLowerCase() === 'f' && !document.querySelector('dialog[open]')) {
+    if (event.shiftKey || !state.active) { event.preventDefault(); $('#search').focus(); $('#search').select(); }
+    else if (!event.defaultPrevented) { event.preventDefault(); if (state.view === 'preview') setView('write'); writingTools?.focusFind(); }
+  }
 });
 window.addEventListener('online', () => { if (state.articles.some((item) => item.isQueued)) runSync({ quiet: true, publish: true }); else void pollPublications({ force: true }); });
 setInterval(() => { if (state.ready && state.articles.some((item) => item.isQueued && !item.conflict)) runSync({ quiet: true, publish: true }); }, 30000);
 setInterval(() => { void pollPublications(); }, 15000);
 window.writer = {
-  async flushBeforeClose() { if (recovery.busy) throw new Error('Wait for the backup or restore operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
-  newArticle, saveCurrent, refresh: () => runSync(), publishCurrent, showHistory: () => openHistory(state.active?.path), showAllHistory: () => openHistory(), showBackups: openBackups,
+  async flushBeforeClose() { if (recovery.busy || mediaBusy || management?.isBusy()) throw new Error('Wait for the current operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
+  newArticle, saveCurrent, pasteImage, refresh: () => runSync(), publishCurrent, showHistory: () => openHistory(state.active?.path), showAllHistory: () => openHistory(), showBackups: openBackups,
 };
+management = installManagement({ api, getSnapshot: () => ({ articles: state.articles, categories: state.categories, active: state.active }), saveActive: saveCurrent, applySnapshot, selectArticle,
+  onError: showError, onToast: showToast, canEdit: () => state.ready && !state.recoveryMode && !state.busy && !state.transitioning && !state.publishing && !mediaBusy });
+management.mountTemplateChooser($('#new-template-chooser'));
 bootstrap();

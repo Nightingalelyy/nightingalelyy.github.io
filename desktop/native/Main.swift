@@ -95,6 +95,8 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         for (name, action, key) in [("Undo", "undo:", "z"), ("Redo", "redo:", "Z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
             edit.addItem(withTitle: name, action: Selector(action), keyEquivalent: key)
         }
+        let pasteImage = edit.addItem(withTitle: "Paste Image", action: #selector(pasteClipboardImage), keyEquivalent: "v")
+        pasteImage.keyEquivalentModifierMask = [.command, .shift]
         let editItem = NSMenuItem(); editItem.submenu = edit; bar.addItem(editItem)
         let help = NSMenu(title: "Help")
         help.addItem(withTitle: "Open Pages CMS", action: #selector(openCMS), keyEquivalent: "")
@@ -109,6 +111,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     @objc private func saveArticle() { webView.evaluateJavaScript("window.writer?.saveCurrent?.()") }
     @objc private func refreshArticles() { webView.evaluateJavaScript("window.writer?.refresh?.()") }
     @objc private func publishArticle() { webView.evaluateJavaScript("window.writer?.publishCurrent?.()") }
+    @objc private func pasteClipboardImage() { webView.evaluateJavaScript("window.writer?.pasteImage?.()") }
     @objc private func openCMS() { NSWorkspace.shared.open(URL(string: "https://app.pagescms.org/Nightingalelyy/nightingalelyy.github.io/main")!) }
     @objc private func openSite() { NSWorkspace.shared.open(URL(string: "https://nightingalelyy.github.io")!) }
     @objc private func showData() {
@@ -121,7 +124,27 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
               let body = message.body as? [String: Any], let id = body["id"] as? String,
               let method = body["method"] as? String else { return }
         let params = body["params"] as? [String: Any] ?? [:]
-        if method == "chooseImage" { chooseImage(id: id); return }
+        if method == "chooseImage" { chooseImage(id: id, optimize: params["optimize"] as? Bool ?? true); return }
+        if method == "pasteImage" {
+            let pasteboard = NSPasteboard.general
+            let formats: [(NSPasteboard.PasteboardType, String)] = [(.png, "png"), (.init(UTType.jpeg.identifier), "jpg"), (.init(UTType.gif.identifier), "gif"), (.init(UTType.webP.identifier), "webp"), (.tiff, "tiff")]
+            for (type, ext) in formats {
+                if let data = pasteboard.data(forType: type) {
+                    storeImage(id: id, data: data, filename: "pasted-image.\(ext)", optimize: params["optimize"] as? Bool ?? true)
+                    return
+                }
+            }
+            respond(id, error: "Copy an image or screenshot first, then choose Paste image.")
+            return
+        }
+        if method == "importImage" {
+            guard let encoded = params["base64"] as? String, encoded.utf8.count <= 28 * 1024 * 1024,
+                  let data = Data(base64Encoded: encoded), let filename = params["filename"] as? String else {
+                respond(id, error: "The pasted image is invalid or larger than 20 MB."); return
+            }
+            storeImage(id: id, data: data, filename: filename, optimize: params["optimize"] as? Bool ?? true)
+            return
+        }
         if method == "openCMS" { openCMS(); respond(id, result: [:]); return }
         if method == "openSite" { openSite(); respond(id, result: [:]); return }
         if method == "exportBackup" { exportBackup(id: id); return }
@@ -157,7 +180,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             }
             return
         }
-        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "refresh", "queuePublish", "processQueue", "resolveConflict", "importImage", "readAsset", "cancelQueued", "discardDraft", "validatePublication", "listHistory", "readHistory", "restoreHistory"]
+        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "renameCategory", "mergeCategory", "listTemplates", "saveTemplate", "removeTemplate", "refresh", "queuePublish", "processQueue", "resolveConflict", "readAsset", "cancelQueued", "discardDraft", "validatePublication", "listHistory", "readHistory", "restoreHistory"]
         guard allowed.contains(method) else { respond(id, error: "Unknown operation."); return }
         worker.async { [weak self] in
             guard let self = self else { return }
@@ -238,10 +261,22 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         }
     }
 
-    private func chooseImage(id: String) {
+    private func storeImage(id: String, data: Data, filename: String, optimize: Bool) {
+        worker.async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let image = try MediaProcessor.prepare(data, filename: filename, optimize: optimize)
+                var result = try self.store.handle(method: "importImage", params: ["filename": image.filename, "base64": image.data.base64EncodedString()])
+                result["imageInfo"] = ["width": image.width, "height": image.height, "originalBytes": image.originalBytes, "bytes": image.data.count, "note": image.note]
+                DispatchQueue.main.async { self.respond(id, result: result) }
+            } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
+        }
+    }
+
+    private func chooseImage(id: String, optimize: Bool) {
         let panel = NSOpenPanel()
         panel.title = "Insert an image"
-        panel.allowedContentTypes = [.png, .jpeg, .gif, .webP]
+        panel.allowedContentTypes = [.png, .jpeg, .gif, .webP, .tiff]
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -253,8 +288,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
                     let values = try url.resourceValues(forKeys: [.fileSizeKey])
                     guard (values.fileSize ?? 0) <= 20 * 1024 * 1024 else { throw NSError(domain: "Writer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Choose an image smaller than 20 MB."]) }
                     let data = try Data(contentsOf: url)
-                    let result = try self.store.handle(method: "importImage", params: ["filename": url.lastPathComponent, "base64": data.base64EncodedString()])
-                    DispatchQueue.main.async { self.respond(id, result: result) }
+                    self.storeImage(id: id, data: data, filename: url.lastPathComponent, optimize: optimize)
                 } catch {
                     DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) }
                 }

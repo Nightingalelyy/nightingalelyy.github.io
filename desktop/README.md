@@ -61,8 +61,37 @@ behave as they do on the website. Code highlighting works offline using macOS's
 system Ruby and never runs the code in an article. Publishing still uses Jekyll,
 so Jekyll-only features such as Liquid can differ from the Markdown preview.
 
+The writing toolbar inserts Markdown formatting, links, headings, lists, quotes,
+and fenced code. Select a code language to insert a new block or change the block
+containing the cursor. **Outline** jumps between article headings; headings inside
+code blocks are excluded. **Find** searches within the article and supports replace.
+Formatting and replacement use the editor's normal undo history.
+
+**Details → Tags** accepts comma-separated labels. Tags are saved as a YAML list,
+with the same limits in Pages CMS: up to 30 tags, each at most 80 characters.
+Library search includes tags, title, category, and article text.
+
+**Manage categories** previews a rename or merge and saves the affected articles
+as local drafts. Filenames and published URLs remain unchanged. Queued or
+conflicted articles must be resolved first. Review and publish each changed
+article when ready; earlier versions remain in history.
+
+Choose **Blank**, **Coding note**, **Personal essay**, or a saved template when
+creating an article. **Templates** can save the current article as a reusable
+starting point. New drafts use the title, category, and date from the creation
+form, without inheriting a template's permalink or publication flags. Custom
+templates stay on this Mac and are included in backups.
+
+Paste a copied screenshot into the editor, or choose **Paste image**. **Optimize
+images** resizes large images to 2400 pixels and compresses JPEG photos; PNG
+screenshots retain transparency and animations stay unchanged. Uncheck it to
+keep original image bytes (clipboard TIFF is converted to web-compatible PNG).
+Original files on disk are never modified. Imported images remain local until
+you publish an article referencing them.
+
 Keyboard shortcuts: **⌘N** new article, **⌘S** save locally, **⌘R** refresh,
-**⇧⌘P** publish. Closing the app waits for pending local saves.
+**⇧⌘P** publish, **⌘F** find in article, **⇧⌘F** search library, **⇧⌘V** paste image.
+Closing the app waits for pending local saves.
 
 ## History and backups
 

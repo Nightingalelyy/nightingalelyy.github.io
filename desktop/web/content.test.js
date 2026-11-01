@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { EditorState } from '@codemirror/state';
-import { parseArticle, editorFields, serializeArticle, normalizeDateForInput } from './content.js';
+import { parseArticle, editorFields, serializeArticle, normalizeDateForInput, tagsForInput, parseTagsInput } from './content.js';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 function walk(directory) {
@@ -73,4 +73,36 @@ test('invalid navigation order cannot serialize and ISO timestamp display is sta
   assert.throws(() => serializeArticle(parsed, { ...fields, order: '-1' }, parsed.body, fields), /Navigation order/);
   assert.throws(() => serializeArticle(parsed, { ...fields, order: 'oops' }, parsed.body, fields), /Navigation order/);
   assert.equal(serializeArticle(parsed, fields, parsed.body, fields), parsed.raw);
+});
+
+test('unmodified legacy tags and YAML lists preserve the complete original source', () => {
+  for (const tagLine of ['tags: algorithms cpp', 'tags: [cpp, "two words", "comma, inside"] # keep', 'tags: []', 'tags:\n  - 个人随笔\n  - C++']) {
+    const raw = `---\ntitle: Example\ncategory: Notes\ndate: 2022-1-3\n${tagLine}\ncustom:\n  keep: true\n---\nBody\n`;
+    const parsed = parseArticle(raw);
+    const fields = editorFields(parsed, '_docs/example.md');
+    assert.equal(serializeArticle(parsed, fields, parsed.body, fields), raw);
+    assert.equal(serializeArticle(parsed, fields, parsed.body + 'Edit\n', fields), parsed.prefix + parsed.body + 'Edit\n');
+  }
+  assert.equal(tagsForInput(['C++', '个人随笔']), 'C++, 个人随笔');
+  assert.equal(tagsForInput('legacy words'), 'legacy words');
+});
+
+test('edited tags become a normalized YAML list without changing other metadata or body', () => {
+  const raw = '---\ntitle: Example\ncategory: Notes\ndate: 2022-1-3\ntags: legacy words\ncustom: {keep: [1, 2]}\n---\n```cpp\nm{ {0,-1} };\n```\n';
+  const parsed = parseArticle(raw);
+  const fields = editorFields(parsed, '_docs/example.md');
+  const updated = parseArticle(serializeArticle(parsed, { ...fields, tags: ' C++, 个人随笔，C++, café, cafe\u0301 ' }, parsed.body, fields));
+  assert.deepEqual(updated.meta, { ...parsed.meta, tags: ['C++', '个人随笔', 'café'] });
+  assert.equal(updated.body, parsed.body);
+  const cleared = parseArticle(serializeArticle(parsed, { ...fields, tags: '' }, parsed.body, fields));
+  const expected = { ...parsed.meta }; delete expected.tags;
+  assert.deepEqual(cleared.meta, expected);
+});
+
+test('tag editing rejects too many, overlong, nontext, and multiline tags', () => {
+  assert.throws(() => parseTagsInput(Array.from({ length: 31 }, (_, index) => `tag-${index}`)), /at most 30/);
+  assert.throws(() => parseTagsInput('x'.repeat(81)), /1–80/);
+  assert.throws(() => parseTagsInput('two\nlines'), /one line/);
+  assert.throws(() => parseTagsInput([123]), /text/);
+  assert.deepEqual(parseTagsInput('one, ONE, two'), ['one', 'two']);
 });

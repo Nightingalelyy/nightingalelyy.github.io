@@ -39,6 +39,14 @@ private struct WriterPublication: Codable {
     var message: String?
 }
 
+private struct WriterTemplate: Codable {
+    var id: String
+    var name: String
+    var rawContent: String
+    var updatedAt: String?
+    var importedFromID: String? = nil
+}
+
 private struct WriterState: Codable {
     var version = 1
     var drafts: [String: WriterDraft] = [:]
@@ -47,6 +55,7 @@ private struct WriterState: Codable {
     // Optional so state written before local categories were introduced still decodes.
     var categories: [String]?
     var publications: [String: WriterPublication]?
+    var templates: [String: WriterTemplate]?
     var state = "ready"
     var message = "Ready to write offline."
     var lastSyncedAt: String?
@@ -112,11 +121,20 @@ final class RepositoryStore {
 
     func handle(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
         try initialize()
-        if needsRestore && !["bootstrap", "status", "listArticles", "readArticle", "listHistory", "readHistory", "readAsset"].contains(method) {
+        if needsRestore && !["bootstrap", "status", "listArticles", "readArticle", "listHistory", "readHistory", "readAsset", "listTemplates"].contains(method) {
             throw fail("Local draft storage needs recovery. Restore a valid backup before editing or publishing.")
         }
         switch method {
         case "bootstrap", "status", "listArticles": return try bootstrap()
+        case "renameCategory", "mergeCategory": return try renameCategory(params)
+        case "listTemplates": return ["templates": templateList()]
+        case "saveTemplate": return try saveTemplate(params)
+        case "removeTemplate", "deleteTemplate":
+            let id = try string(params, "id")
+            guard state.templates?[id] != nil else { throw fail("This template no longer exists. Refresh the template list.") }
+            try automaticBackup(force: true)
+            state.templates?.removeValue(forKey: id)
+            try persist(); return try bootstrap()
         case "createCategory":
             let supplied = try string(params, "name")
             guard !supplied.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) else {
@@ -235,6 +253,152 @@ final class RepositoryStore {
         case "readAsset": return try readAsset(path: string(params, "path"))
         default: throw fail("Unknown application command: \(method)")
         }
+    }
+
+    private func normalizedLabel(_ supplied: String, kind: String) throws -> String {
+        guard !supplied.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) else {
+            throw fail("\(kind) names cannot contain control characters or line breaks.")
+        }
+        let name = supplied.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
+        guard !name.isEmpty, name.count <= 80 else { throw fail("Enter a \(kind.lowercased()) name between 1 and 80 characters.") }
+        return name
+    }
+
+    private func sameLabel(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.compare(rhs, options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) == .orderedSame
+    }
+
+    private func articleBody(_ content: String) throws -> String {
+        try validateArticleContent(content)
+        guard let openingEnd = content.firstIndex(of: "\n"),
+              let closing = content.range(of: "(?m)^---[\\t ]*\\r?(?:\\n|$)", options: .regularExpression, range: content.index(after: openingEnd)..<content.endIndex) else {
+            throw fail("The article frontmatter delimiter is invalid.")
+        }
+        return String(content[closing.upperBound...])
+    }
+
+    private func renameCategory(_ params: [String: Any]) throws -> [String: Any] {
+        let from = try normalizedLabel((params["from"] ?? params["sourceName"]) as? String ?? "", kind: "Category")
+        let proposed = try normalizedLabel((params["to"] ?? params["targetName"]) as? String ?? "", kind: "Category")
+        let to = (state.categories ?? []).first { !sameLabel($0, from) && sameLabel($0, proposed) } ?? proposed
+        guard let expected = params["expectedRevisions"] as? [String: String],
+              let changes = params["changes"] as? [[String: Any]], changes.count <= 10000 else { throw fail("A category change requires a complete library revision snapshot.") }
+        let paths = Set(articles.keys).union(state.drafts.keys)
+        guard Set(expected.keys) == paths else { throw fail("The article library changed. Refresh it before renaming a category.") }
+        for path in paths {
+            let current = state.drafts[path]?.rawContent ?? articles[path]!.rawContent
+            guard expected[path] == digest(current) else { throw fail("An article changed. Refresh the library before renaming a category.") }
+        }
+        var prepared: [(path: String, old: String, new: String)] = []
+        var seen = Set<String>()
+        for change in changes {
+            let path = try string(change, "path")
+            try validateArticlePath(path)
+            guard paths.contains(path), seen.insert(path).inserted else { throw fail("The category change contains an unknown or repeated article.") }
+            guard state.queue[path] == nil, state.conflicts[path] == nil else { throw fail("Cancel queued publication and resolve conflicts for affected articles before changing a category.") }
+            let old = state.drafts[path]?.rawContent ?? articles[path]!.rawContent
+            guard try string(change, "expectedRevision") == digest(old) else { throw fail("An affected article changed. Refresh the library and try again.") }
+            let new = try string(change, "rawContent")
+            guard try articleBody(old) == articleBody(new) else { throw fail("A category change cannot modify article text or code.") }
+            prepared.append((path, old, new))
+        }
+        guard !prepared.isEmpty || (state.categories ?? []).contains(where: { sameLabel($0, from) }) else { throw fail("The source category no longer exists. Refresh the library.") }
+        try automaticBackup(force: true)
+        let previous = state
+        var recoveryFiles: [URL] = []
+        do {
+            for change in prepared where change.old != change.new {
+                if let file = try archiveContent(path: change.path, content: change.old, reason: "before-category-change") { recoveryFiles.append(file) }
+                let existing = state.drafts[change.path]
+                state.drafts[change.path] = WriterDraft(rawContent: change.new,
+                    baseBlob: existing != nil ? existing!.baseBlob : articles[change.path]?.blob,
+                    baseContent: existing != nil ? existing!.baseContent : articles[change.path]?.rawContent, updatedAt: now())
+            }
+            var categories = (state.categories ?? []).filter { !sameLabel($0, from) }
+            if !categories.contains(where: { sameLabel($0, to) }) { categories.append(to) }
+            state.categories = categories
+            if state.queue.isEmpty && state.conflicts.isEmpty { state.state = "local" }
+            state.message = "Category updated locally. Article URLs and publication queue are unchanged."
+            try persist()
+        } catch {
+            state = previous
+            for file in recoveryFiles { try? fm.removeItem(at: file) }
+            pendingHistoryPrunes.removeAll()
+            throw error
+        }
+        var result = try bootstrap()
+        result["category"] = to
+        result["categoryChange"] = ["from": from, "to": to, "articlesChanged": prepared.filter { $0.old != $0.new }.count]
+        return result
+    }
+
+    private func templateJSON(_ template: WriterTemplate) -> [String: Any] {
+        var result: [String: Any] = ["id": template.id, "name": template.name, "rawContent": template.rawContent]
+        if let updated = template.updatedAt { result["updatedAt"] = updated }
+        return result
+    }
+
+    private func templateList() -> [[String: Any]] {
+        (state.templates ?? [:]).values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.map(templateJSON)
+    }
+
+    private func validateTemplates(_ templates: [String: WriterTemplate]) throws {
+        guard templates.count <= 100 else { throw fail("Keep at most 100 local templates.") }
+        var names = Set<String>()
+        for (id, template) in templates {
+            guard id == template.id, UUID(uuidString: id) != nil, template.rawContent.utf8.count <= 5 * 1024 * 1024,
+                  template.importedFromID == nil || UUID(uuidString: template.importedFromID!) != nil else { throw fail("A template is invalid or exceeds the 5 MiB content limit.") }
+            let name = try normalizedLabel(template.name, kind: "Template")
+            let key = name.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            guard names.insert(key).inserted else { throw fail("Template names must be distinct.") }
+        }
+    }
+
+    private func saveTemplate(_ params: [String: Any]) throws -> [String: Any] {
+        let name = try normalizedLabel(string(params, "name"), kind: "Template")
+        let content = try string(params, "rawContent")
+        guard content.utf8.count <= 5 * 1024 * 1024 else { throw fail("A template must be smaller than 5 MiB.") }
+        var templates = state.templates ?? [:]
+        let id: String
+        if let requested = params["id"] as? String {
+            guard templates[requested] != nil else { throw fail("This template no longer exists. Refresh the template list.") }
+            id = requested
+        } else {
+            guard templates.count < 100 else { throw fail("Keep at most 100 local templates.") }
+            id = UUID().uuidString
+        }
+        guard !templates.values.contains(where: { $0.id != id && sameLabel($0.name, name) }) else { throw fail("A template already uses this name. Choose another name.") }
+        if templates[id] != nil { try automaticBackup(force: true) }
+        let template = WriterTemplate(id: id, name: name, rawContent: content, updatedAt: now(), importedFromID: templates[id]?.importedFromID)
+        templates[id] = template; state.templates = templates
+        try persist()
+        var result = try bootstrap(); result["template"] = templateJSON(template)
+        return result
+    }
+
+    private func mergedTemplates(_ incoming: [String: WriterTemplate]) throws -> [String: WriterTemplate] {
+        var templates = state.templates ?? [:]
+        for template in incoming.values.sorted(by: { $0.id < $1.id }) {
+            let normalizedName = try normalizedLabel(template.name, kind: "Template")
+            let sourceID = template.importedFromID ?? template.id
+            if templates.values.contains(where: {
+                $0.rawContent == template.rawContent && (sameLabel($0.name, normalizedName) || $0.id == template.id || $0.importedFromID == sourceID)
+            }) { continue }
+            var candidate = template
+            candidate.name = normalizedName
+            if templates[candidate.id] != nil { candidate.id = UUID().uuidString; candidate.importedFromID = sourceID }
+            if templates.values.contains(where: { sameLabel($0.name, candidate.name) }) {
+                var index = 1
+                repeat {
+                    let suffix = index == 1 ? " (imported)" : " (imported \(index))"
+                    candidate.name = String(normalizedName.prefix(80 - suffix.count)) + suffix
+                    index += 1
+                } while templates.values.contains(where: { sameLabel($0.name, candidate.name) })
+            }
+            templates[candidate.id] = candidate
+            guard templates.count <= 100 else { throw fail("Restoring this backup would exceed 100 local templates. Existing templates were not changed.") }
+        }
+        return templates
     }
 
     private func string(_ params: [String: Any], _ key: String) throws -> String {
@@ -370,7 +534,7 @@ final class RepositoryStore {
 
     private func workFingerprint(_ value: WriterState) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(value.drafts) + encoder.encode(value.queue) + encoder.encode(value.categories)
+        return try encoder.encode(value.drafts) + encoder.encode(value.queue) + encoder.encode(value.categories) + encoder.encode(value.templates)
     }
 
     func exportBackup() throws -> Data {
@@ -408,6 +572,8 @@ final class RepositoryStore {
               let images = payload["assets"] as? [[String: Any]], images.count <= 10000 else { throw fail("Choose a valid Nightingale Writer backup for this repository (up to 256 MB).") }
         let restored = try JSONDecoder().decode(WriterState.self, from: JSONSerialization.data(withJSONObject: stateObject))
         guard restored.version == 1, restored.drafts.count <= 10000, restored.queue.count <= 10000 else { throw fail("This backup version or size is unsupported.") }
+        try validateTemplates(restored.templates ?? [:])
+        _ = try mergedTemplates(restored.templates ?? [:])
         for (path, draft) in restored.drafts { try validateArticlePath(path); try validateArticleContent(draft.rawContent) }
         for (path, queued) in restored.queue { try validateArticlePath(path); try validateArticleContent(queued.rawContent) }
         for name in restored.categories ?? [] {
@@ -439,7 +605,7 @@ final class RepositoryStore {
         try initialize()
         let (restored, history, assets, createdAt) = try validatedBackup(data)
         return ["formatVersion": 1, "createdAt": createdAt, "draftCount": restored.drafts.count, "queuedCount": restored.queue.count,
-                "categoryCount": restored.categories?.count ?? 0, "assetCount": assets.count, "historyCount": history.count, "bytes": data.count,
+                "categoryCount": restored.categories?.count ?? 0, "templateCount": restored.templates?.count ?? 0, "assetCount": assets.count, "historyCount": history.count, "bytes": data.count,
                 "existingDraftCollisions": restored.drafts.filter { path, draft in state.drafts[path] != nil && state.drafts[path]?.rawContent != draft.rawContent }.count]
     }
 
@@ -447,6 +613,8 @@ final class RepositoryStore {
         try initialize()
         let (restored, histories, assets, _) = try validatedBackup(data)
         let previous = state
+        let mergedLocalTemplates = try mergedTemplates(restored.templates ?? [:])
+        let templatesAdded = mergedLocalTemplates.count - (state.templates?.count ?? 0)
         let recovering = needsRestore
         var corruptCheckpoint: String?
         if recovering {
@@ -496,6 +664,7 @@ final class RepositoryStore {
             var categories = state.categories ?? []
             for name in restored.categories ?? [] where !categories.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) { categories.append(name) }
             state.categories = categories
+            state.templates = mergedLocalTemplates
             // Existing queue/conflicts/publication status are untouched; imported queues are never activated.
             if recovering {
                 guard let original = corruptStateBytes, try Data(contentsOf: stateFile) == original else { throw fail("Unreadable local storage changed during recovery. Nothing was replaced.") }
@@ -517,7 +686,7 @@ final class RepositoryStore {
             catch { backupWarning = "Recovery succeeded, but the automatic backup could not be written." }
         }
         var result = try bootstrap()
-        var summary: [String: Any] = ["draftsAdded": draftsAdded, "versionsAdded": versionsAdded, "activeQueueRestored": false]
+        var summary: [String: Any] = ["draftsAdded": draftsAdded, "versionsAdded": versionsAdded, "templatesAdded": templatesAdded, "activeQueueRestored": false]
         if let checkpoint = corruptCheckpoint { summary["corruptStateCheckpoint"] = checkpoint }
         result["backupResult"] = summary
         return result
@@ -693,7 +862,7 @@ final class RepositoryStore {
 
     private func bootstrap() throws -> [String: Any] {
         let paths = Set(articles.keys).union(state.drafts.keys).sorted()
-        var result: [String: Any] = ["articles": try paths.map { try articleJSON(path: $0) }, "categories": state.categories ?? [], "status": statusJSON(),
+        var result: [String: Any] = ["articles": try paths.map { try articleJSON(path: $0) }, "categories": state.categories ?? [], "templates": templateList(), "status": statusJSON(),
                 "repositoryPath": repository.path, "remoteURL": remoteURL, "branch": "main", "publications": publicationTargets(),
                 "recovery": ["needsRestore": needsRestore, "message": needsRestore ? state.message : "", "automaticBackupDirectory": root.appendingPathComponent("backups").path, "historyLimitPerArticle": 100]]
         if let warning = backupWarning { result["backupWarning"] = warning }
