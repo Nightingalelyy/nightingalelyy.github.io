@@ -29,10 +29,12 @@ class PublishingValidatorTest < Minitest::Test
   end
 
   def test_current_repository_baseline
-    result = Publishing::Validator.new(Publishing::Repository.request(File.expand_path('..', __dir__))).validate
+    request = Publishing::Repository.request(File.expand_path('..', __dir__))
+    validator = Publishing::Validator.new(request)
+    result = validator.validate
     assert result['ok'], result['issues'].inspect
-    assert_operator result['summary']['documents'], :>=, 139
-    assert_operator result['summary']['codeBlocks'], :>=, 139
+    assert_equal request['documents'].length, result['summary']['documents']
+    assert_equal request['documents'].map { |document| document['path'] }.sort, validator.documents.map { |document| document[:path] }.sort
   end
 
   def test_initializer_regression

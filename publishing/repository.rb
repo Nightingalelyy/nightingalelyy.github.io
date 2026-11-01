@@ -33,8 +33,15 @@ module Publishing
         end
       end
       visit.call(source, '')
-      # The other site-owned pages intentionally contain Liquid templates.
-      routes = ['/', '/404.html', '/admin/', '/search/', '/changelog/', '/feed.xml', '/sitemap.xml', '/css/main.css']
+      # Authored documents contribute their own routes in Validator. Never add
+      # a deleted homepage or 404 route merely because it used to be present.
+      # These other site-owned pages intentionally contain Liquid templates.
+      routes = []
+      routes << '/search/' if File.file?(File.join(source, 'search.html'))
+      routes << '/changelog/' if File.file?(File.join(source, 'changelog.html'))
+      routes << '/css/main.css' if File.file?(File.join(source, 'css/main.scss'))
+      routes << '/feed.xml' if Array(config['plugins']).include?('jekyll-feed')
+      routes << '/sitemap.xml' if Array(config['plugins']).include?('jekyll-sitemap')
       { 'schemaVersion' => VERSION, 'documents' => documents, 'files' => files, 'routes' => routes,
         'site' => { 'url' => config.fetch('url', 'https://nightingalelyy.github.io'), 'baseurl' => config['baseurl'].to_s } }
     end
