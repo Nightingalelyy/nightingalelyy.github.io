@@ -26,6 +26,12 @@ timezone: Etc/UTC
 
 permalink: pretty
 
+# Keep the line breaks entered in the writing apps visible on the site.
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: true
+
 plugins:
   - jekyll-sitemap
   - jekyll-seo-tag
