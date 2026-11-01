@@ -167,6 +167,10 @@ struct RepositoryStoreTests {
         let removed = try confirm(renewed)
         let deletion = (removed["deletion"] as! [String: Any]), row = rows(removed).first!
         try expect(deletion["status"] as? String == "uploaded", "Successful second confirmation uploads one deletion")
+        let uploadedMessage = status(removed)["message"] as! String
+        try expect(uploadedMessage.contains("source was erased") && uploadedMessage.contains("awaiting deployment") && !uploadedMessage.contains("unchanged"), "Uploaded deletion footer must replace the first-stage GitHub-unchanged message")
+        let durableUploadedState = try JSONSerialization.jsonObject(with: Data(contentsOf: stateFile)) as! [String: Any]
+        try expect(durableUploadedState["message"] as? String == uploadedMessage, "The confirmed deletion message must persist with its uploaded record")
         try expect(row["rawContent"] == nil && row["draft"] == nil, "Deletion status and deployment targets must not expose retained drafts")
         try expect(try item(store, unrelatedQueue)["isQueued"] as? Bool == true, "Deletion must preserve unrelated queued publication")
         try rejects("Deleting another source must not process unrelated queued articles") { _ = try git(["show", "main:\(unrelatedQueue)"], at: remote) }
@@ -242,6 +246,8 @@ struct RepositoryStoreTests {
         let pending = RepositoryStore(root: app, remoteURL: remote.path, identity: identity, validation: validator)
         let pendingSnapshot = try pending.handle(method: "bootstrap")
         try expect(rows(pendingSnapshot).first { $0["path"] as? String == other }?["status"] as? String == "unknown", "Unresolved intent stays unknown before ancestry confirmation")
+        let uncertainMessage = status(pendingSnapshot)["message"] as! String
+        try expect(uncertainMessage.contains("not been confirmed") && !uncertainMessage.contains("unchanged"), "Unresolved intent footer must honestly describe uncertain remote state")
         _ = try process(pending)
         try expect(try git(["rev-parse", "main"], at: remote).trimmingCharacters(in: .whitespacesAndNewlines) == parent, "Relaunch and queue processing cannot execute a durable intent")
         var falseUpload = rows(pendingSnapshot).first { $0["path"] as? String == other }!; falseUpload["status"] = "uploaded"
@@ -262,9 +268,11 @@ struct RepositoryStoreTests {
         try fm.moveItem(at: stateFile, to: savedState); try fm.createDirectory(at: stateFile, withIntermediateDirectories: false)
         try rejects("Post-push reconciliation storage failure must be reported") { _ = try pending.handle(method: "refresh") }
         try fm.removeItem(at: stateFile); try fm.moveItem(at: savedState, to: stateFile)
+        try expect(status(try pending.handle(method: "bootstrap"))["message"] as? String == uncertainMessage, "Post-push storage failure must retain the durable uncertain message")
         let recovered = RepositoryStore(root: app, remoteURL: remote.path, identity: identity, validation: validator)
         let settled = try recovered.handle(method: "bootstrap")
         try expect(rows(settled).first { $0["path"] as? String == other }?["status"] as? String == "uploaded", "Relaunch reconciles already pushed deletion through cached commit ancestry")
+        try expect((status(settled)["message"] as! String).contains("source was erased"), "Relaunch reconciliation persists the truthful uploaded footer")
         try expect(!all(settled).contains { $0["path"] as? String == other }, "Post-push recovery cannot recreate erased source from stale cache")
         let deletionBackup = try recovered.exportBackup()
         let cleanRecipient = RepositoryStore(root: root.appendingPathComponent("tombstone-import"), remoteURL: remote.path, identity: identity)

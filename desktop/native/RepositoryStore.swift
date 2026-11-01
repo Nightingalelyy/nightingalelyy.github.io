@@ -529,6 +529,8 @@ final class RepositoryStore {
                 intents[path] = WriterDeletionIntent(commit: commit, parentCommit: parent, sourceSHA256: digest(remote.rawContent), expectedRevision: removal.expectedRevision,
                     remoteBlob: remote.blob, liveURL: removal.liveURL, createdAt: now(), retainedRef: retainedRef)
                 state.deletionIntents = intents
+                state.state = "unknown"
+                state.message = "GitHub deletion requested. Its result has not been confirmed. No automatic retry will occur."
                 // Durable intent is written before the irreversible push, and is never an execution queue.
                 do { try persist() }
                 catch { _ = try? git(["update-ref", "-d", retainedRef], at: repository); throw error }
@@ -572,21 +574,33 @@ final class RepositoryStore {
                     records[path] = WriterDeletion(sourceSHA256: intent.sourceSHA256, commit: intent.commit, status: "uploaded", liveURL: intent.liveURL,
                         uploadedAt: intent.createdAt, workflowURL: nil, checkedAt: nil, message: "GitHub source erased; website removal is awaiting verification.")
                     state.deletions = records
+                    state.state = "synced"
+                    state.message = "The GitHub source was erased. Website removal is awaiting deployment verification."
                     state.publications?.removeValue(forKey: path)
                     state.localRemovals?.removeValue(forKey: path)
                     if let newer = state.drafts[path] { state.drafts[path] = WriterDraft(rawContent: newer.rawContent, baseBlob: nil, baseContent: nil, updatedAt: newer.updatedAt) }
                 } else {
                     // The source was deliberately recreated after the deletion commit.
                     state.deletions?.removeValue(forKey: path)
+                    state.state = "ready"
+                    state.message = "The source is present again on GitHub. Review its latest version before another deletion."
                 }
                 state.deletionIntents?.removeValue(forKey: path); releaseRefs.append(intent.retainedRef); changed = true
             } else if head != intent.parentCommit && isKnownDescendant(head, of: intent.parentCommit) {
                 // Another remote commit won the race. No automatic rebase or retry is allowed.
                 state.deletionIntents?.removeValue(forKey: path); releaseRefs.append(intent.retainedRef); changed = true
+                state.state = "ready"
+                state.message = "GitHub now has a different revision. Review the locally removed source before trying again."
             }
         }
         for (path, deletion) in state.deletions ?? [:] where articles[path] != nil && isKnownDescendant(head, of: deletion.commit) {
             state.deletions?.removeValue(forKey: path); changed = true
+        }
+        if !(state.deletionIntents ?? [:]).isEmpty {
+            let pendingMessage = "GitHub deletion requested. Its result has not been confirmed. No automatic retry will occur."
+            if state.state != "unknown" || state.message != pendingMessage {
+                state.state = "unknown"; state.message = pendingMessage; changed = true
+            }
         }
         if changed {
             pruneDeletionRecords()
