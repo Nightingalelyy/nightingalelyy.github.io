@@ -1,7 +1,8 @@
 # Yuyang Liu's Blog
 
-Jekyll site at <https://nightingalelyy.github.io>, published by GitHub Pages from
-the root of `main`. The design is based on CloudCannon's Edition theme.
+Jekyll site at <https://nightingalelyy.github.io>, built from `main` and published
+by the **Publish website** GitHub Actions workflow after validation succeeds.
+The design is based on CloudCannon's Edition theme.
 
 ## Edit the site
 
@@ -23,9 +24,14 @@ The article editor supports formatted text and Markdown source. Use the source
 switch for existing articles with C++ code blocks or HTML such as `<sup>`. Review
 the result before saving. Uploaded images are stored in `images/uploads/`.
 
-**Save writes to `main` and starts publication.** Wait for the GitHub Pages build
-to finish, then check the live page. Saved work is not a private draft: this is a
-public repository. Git history keeps earlier versions of each file.
+**Save writes to `main` and starts the publishing checks.** The workflow checks
+metadata, template expressions, local image/link targets, and whether code text
+survives the full site build. A failed check keeps the previous website online;
+open the failed workflow for file names and line numbers, correct the source,
+and save again. A GitHub commit is not proof that its website deployment is live.
+Saved CMS work is public in this repository, even if deployment fails. Git
+history keeps earlier versions of each file. Use Nightingale Writer for private
+offline drafts.
 
 Existing filenames are kept when editing, so changing a title does not change its
 URL. File renaming is disabled in the CMS to protect existing links.
@@ -50,6 +56,8 @@ in this repository.
 - `css/main.scss` and `_sass/`: styles.
 - `_config.yml`: Jekyll configuration.
 - `.pages.yml`: CMS fields, collections, and media configuration.
+- `publishing/`: shared offline content checks and site build verification.
+- `.github/workflows/pages.yml`: validated build and deployment.
 
 Pages CMS merges configured fields into existing metadata so fields outside the
 editor schema are retained. Empty template and placeholder files are excluded
@@ -58,19 +66,21 @@ the article collection.
 
 ## Local development
 
-The repository pins Jekyll 3.8.4 and its plugins in `Gemfile` and `Gemfile.lock`.
-With a compatible Ruby/Bundler environment:
+The repository pins Jekyll 3.10.0, kramdown 2.4.0, and Rouge 3.30.0 with its
+plugins in `Gemfile` and `Gemfile.lock`. CI uses Ruby 3.3 and Bundler 2.4.22.
 
 ```sh
 bundle install
 bundle exec jekyll serve
 ```
 
-Open <http://localhost:4000>. For a production-mode build:
+Open <http://localhost:4000>. For the same verified production build used by CI:
 
 ```sh
-JEKYLL_ENV=production bundle exec jekyll build
+bundle exec ruby publishing/validate_repository.rb --build --destination _site
 ```
 
-GitHub Pages uses its managed Jekyll build, so its installed versions may differ
-from the historical local lockfile.
+Keep the repository's Pages publishing source set to **GitHub Actions**. Legacy
+branch publishing bypasses this workflow's deployment gate. The workflow emits
+`publication-manifest.json` with the deployed commit and source hashes for the
+desktop app to verify which article versions are live.

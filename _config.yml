@@ -39,6 +39,8 @@ plugins:
 
 exclude:
   - .pages.yml
+  - desktop
+  - publishing
   - Gemfile
   - Gemfile.lock
   - README.md
