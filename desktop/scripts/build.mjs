@@ -16,7 +16,8 @@ fs.mkdirSync(path.join(resources, 'web'), { recursive: true });
 fs.mkdirSync(path.join(root, '.build', 'module-cache'), { recursive: true });
 const nativeSnapshot = path.join(root, '.build', 'native-source');
 fs.mkdirSync(nativeSnapshot, { recursive: true });
-for (const file of ['Main.swift', 'RepositoryStore.swift', 'CodeHighlighter.swift']) fs.copyFileSync(path.join(root, 'native', file), path.join(nativeSnapshot, file));
+const nativeSources = ['Main.swift', 'RepositoryStore.swift', 'CodeHighlighter.swift', 'PublishingValidator.swift', 'DeploymentClient.swift'];
+for (const file of nativeSources) fs.copyFileSync(path.join(root, 'native', file), path.join(nativeSnapshot, file));
 buildSitePreview(path.join(resources, 'web'));
 await build({ entryPoints: [path.join(root, 'web/app.js')], bundle: true, format: 'iife', target: 'safari16', outfile: path.join(resources, 'web/app.js'), minify: true, sourcemap: false, logLevel: 'info' });
 fs.copyFileSync(path.join(root, 'web/styles.css'), path.join(resources, 'web/styles.css'));
@@ -25,7 +26,9 @@ for (const directory of ['preview', 'vendor/rouge']) {
   fs.rmSync(destination, { recursive: true, force: true });
   fs.cpSync(path.join(root, directory), destination, { recursive: true });
 }
-run('/usr/bin/swiftc', ['-swift-version', '5', ...(process.env.WRITER_DEBUG_BUILD ? [] : ['-O']), '-parse-as-library', '-module-cache-path', path.join(root, '.build/module-cache'), '-target', 'arm64-apple-macosx13.0', path.join(nativeSnapshot, 'Main.swift'), path.join(nativeSnapshot, 'RepositoryStore.swift'), path.join(nativeSnapshot, 'CodeHighlighter.swift'), '-framework', 'AppKit', '-framework', 'WebKit', '-o', path.join(app, 'Contents/MacOS/NightingaleWriter')]);
+fs.rmSync(path.join(resources, 'publishing'), { recursive: true, force: true });
+fs.cpSync(path.join(repo, 'publishing'), path.join(resources, 'publishing'), { recursive: true });
+run('/usr/bin/swiftc', ['-swift-version', '5', ...(process.env.WRITER_DEBUG_BUILD ? [] : ['-O']), '-parse-as-library', '-module-cache-path', path.join(root, '.build/module-cache'), '-target', 'arm64-apple-macosx13.0', ...nativeSources.map(file => path.join(nativeSnapshot, file)), '-framework', 'AppKit', '-framework', 'WebKit', '-o', path.join(app, 'Contents/MacOS/NightingaleWriter')]);
 
 const seed = path.join(resources, 'Seed.git');
 if (fs.existsSync(seed)) fs.rmSync(seed, { recursive: true });
@@ -49,8 +52,8 @@ fs.writeFileSync(path.join(app, 'Contents/Info.plist'), `<?xml version="1.0" enc
 <key>CFBundleIdentifier</key><string>io.github.nightingalelyy.writer</string>
 <key>CFBundleExecutable</key><string>NightingaleWriter</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.4</string>
-<key>CFBundleVersion</key><string>5</string>
+<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleVersion</key><string>6</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>

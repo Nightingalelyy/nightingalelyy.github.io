@@ -16,6 +16,8 @@
         <button id="sync-button" class="button quiet" title="Get the latest articles and publish queued changes"><span data-icon="refresh"></span><span>Sync</span></button>
       </header>
 
+      <div id="recovery-banner" class="global-recovery-banner" role="alert" hidden><span data-icon="alert"></span><div><strong>Your local workspace needs recovery</strong><p id="recovery-message"></p></div><button id="recovery-backups-button" class="button">Open Backups</button></div>
+
       <div class="workspace">
         <aside class="sidebar" aria-label="Library">
           <button id="new-button" class="button new-button"><span data-icon="plus"></span>New article<span class="shortcut">⌘N</span></button>
@@ -29,6 +31,8 @@
           <div class="categories-heading"><div class="section-label">CATEGORIES</div><button id="add-category-button" class="icon-button" title="Add category" aria-label="Add category" disabled><span data-icon="plus"></span></button></div>
           <nav id="category-nav" aria-label="Article categories"></nav>
           <div class="sidebar-bottom">
+            <button id="global-history-button" class="sidebar-action"><span data-icon="clock"></span>History &amp; recovery</button>
+            <button id="backups-button" class="sidebar-action"><span data-icon="laptop"></span>Backups</button>
             <a href="https://app.pagescms.org/Nightingalelyy/nightingalelyy.github.io/main" class="external-link"><span data-icon="globe"></span>Open web editor<span data-icon="arrow-up-right"></span></a>
             <div class="local-note"><span data-icon="laptop"></span><span>Your drafts stay on this Mac<br><strong>until you choose Publish.</strong></span></div>
           </div>
@@ -52,6 +56,7 @@
             <div class="document-toolbar">
               <div class="document-location"><span data-icon="page"></span><span id="document-category">Article</span><span class="small-dot">·</span><span id="document-state">Saved</span></div>
               <div class="document-actions">
+                <button id="history-button" class="icon-button muted" title="Article history" aria-label="Article history"><span data-icon="clock"></span></button>
                 <button id="discard-button" class="icon-button muted" title="Discard local changes" aria-label="Discard local draft" hidden><span data-icon="trash"></span></button>
                 <button id="cancel-queue-button" class="button quiet" hidden>Cancel queued publish</button>
                 <button id="save-button" class="button quiet"><span data-icon="check"></span><span id="save-label">Saved</span></button>
@@ -60,6 +65,7 @@
             </div>
             <div id="conflict-banner" class="notice conflict-notice" hidden><span data-icon="alert"></span><span>This article also changed online. Review both versions before publishing.</span><button id="review-conflict-button" class="button small">Review</button></div>
             <div id="queued-banner" class="notice queue-notice" hidden><span data-icon="clock"></span><span id="queued-message">This version is queued for publication. New edits remain local.</span></div>
+            <div id="publication-banner" class="notice publication-notice" hidden><span id="publication-icon" data-icon="globe"></span><span id="publication-message" aria-live="polite"></span><a id="publication-build-link" class="notice-link" target="_blank" rel="noopener noreferrer" hidden>View build</a><a id="publication-live-link" class="notice-link" target="_blank" rel="noopener noreferrer" hidden>Open site</a></div>
             <div class="document-header">
               <label class="title-label" for="title-input">Title</label>
               <input id="title-input" class="document-title" type="text" placeholder="Untitled article" aria-label="Article title" autocomplete="off" />
@@ -126,6 +132,40 @@
     </dialog>
 
     <dialog id="confirm-dialog" class="modal confirmation-modal"><h2>Discard this local draft?</h2><p id="confirm-message" class="modal-description">The online article will stay unchanged.</p><div class="modal-actions"><button id="confirm-cancel" class="button">Keep draft</button><button id="confirm-discard" class="button danger">Discard local draft</button></div></dialog>
+
+    <dialog id="validation-dialog" class="modal validation-modal" aria-labelledby="validation-title">
+      <div class="modal-heading"><span class="modal-icon amber" data-icon="alert"></span><button type="button" class="icon-button" data-close="validation-dialog" aria-label="Close publication checks"><span data-icon="close"></span></button></div>
+      <h2 id="validation-title">Before publishing</h2><p id="validation-summary" class="modal-description"></p>
+      <ul id="validation-issues" class="validation-issues"></ul>
+      <div class="modal-actions"><span id="validation-footnote" class="modal-help">Your draft is saved locally.</span><button type="button" class="button" data-close="validation-dialog">Keep editing</button><button id="validation-publish-button" class="button primary" hidden>Publish anyway</button></div>
+    </dialog>
+
+    <dialog id="history-dialog" class="modal history-modal" aria-labelledby="history-title">
+      <div class="modal-heading"><span class="modal-icon" data-icon="clock"></span><button type="button" class="icon-button" data-close="history-dialog" aria-label="Close history"><span data-icon="close"></span></button></div>
+      <div class="history-heading"><div><h2 id="history-title">Article history</h2><p id="history-description" class="modal-description">Compare a saved version with your current work.</p></div><button id="history-all-button" class="button quiet small">Show all history</button></div>
+      <div id="history-error" class="inline-error" role="alert" hidden></div>
+      <div class="history-workspace">
+        <div id="history-list" class="history-list" role="group" aria-label="Saved versions"></div>
+        <div class="history-comparison">
+          <div id="history-empty" class="history-empty">Choose a saved version to compare.</div>
+          <div id="history-comparison-content" hidden><div class="history-comparison-heading"><strong id="history-path"></strong><span id="history-diff-summary"></span></div><div class="history-columns"><section><h3 id="history-current-title">Current on this Mac</h3><pre id="history-current-source" aria-label="Current article source" tabindex="0"></pre></section><section><h3 id="history-selected-title">Selected saved version</h3><pre id="history-selected-source" aria-label="Selected version source" tabindex="0"></pre></section></div></div>
+        </div>
+      </div>
+      <div id="history-queued-notice" class="history-queued-notice" hidden><span>Cancel this article’s queued publish before restoring a version.</span><button id="history-cancel-queue" class="button small">Cancel queued publish</button></div>
+      <div class="modal-actions"><span id="history-restore-note" class="modal-help">Restoring saves a local draft. It does not publish.</span><button type="button" class="button" data-close="history-dialog">Close</button><button id="history-restore-button" class="button primary" disabled>Restore as local draft</button></div>
+    </dialog>
+
+    <dialog id="backup-dialog" class="modal backup-modal" aria-labelledby="backup-title">
+      <div class="modal-heading"><span class="modal-icon" data-icon="laptop"></span><button type="button" class="icon-button" data-close="backup-dialog" aria-label="Close backups"><span data-icon="close"></span></button></div>
+      <h2 id="backup-title">Back up your writing</h2><p id="backup-description" class="modal-description">Keep a copy of your local drafts, images, categories, and saved history.</p>
+      <div class="backup-actions"><button id="export-backup-button" class="button"><span data-icon="upload"></span>Export backup…</button><button id="choose-backup-button" class="button"><span data-icon="folder"></span>Choose backup to restore…</button></div>
+      <div id="backup-error" class="inline-error" role="alert" hidden></div>
+      <section id="backup-preview" class="backup-preview" aria-label="Backup restore preview" hidden>
+        <h3>Restore this backup?</h3><p id="backup-created-at"></p><dl id="backup-counts" class="backup-counts"></dl>
+        <p id="backup-collisions" class="backup-note"></p><p id="backup-queue-note" class="backup-note">Imported queued articles become local drafts or saved history. They will not publish automatically. Your existing publish queue stays unchanged.</p>
+      </section>
+      <div class="modal-actions"><button type="button" class="button" data-close="backup-dialog">Close</button><button id="restore-backup-button" class="button primary" hidden>Restore locally</button></div>
+    </dialog>
     <div id="toast-region" aria-live="polite" aria-atomic="true"></div>
   </body>
 </html>

@@ -238,7 +238,199 @@ struct RepositoryStoreTests {
         let validLongCategory = try categoryRestart.handle(method: "createCategory", params: ["name": longestCategory])
         try expect(validLongCategory["category"] as? String == longestCategory, "An 80-character Unicode category must be accepted")
 
+        // Rolling local history survives discarded files; restoration cannot bypass publication intent.
+        let recoveryRoot = root.appendingPathComponent("recovery-data")
+        let recovery = RepositoryStore(root: recoveryRoot, remoteURL: remote.path, seedRepo: source, identity: identity)
+        _ = try recovery.handle(method: "bootstrap")
+        let recoveryPath = "_docs/2026-11-02-recover-me.md"
+        let firstVersion = raw("Recovery", body: "First local version")
+        _ = try recovery.handle(method: "createArticle", params: ["path": recoveryPath, "rawContent": firstVersion])
+        try save(recovery, recoveryPath, raw("Recovery", body: "Second version"))
+        let historyBeforeCoalescing = (try recovery.handle(method: "listHistory", params: ["path": recoveryPath])["entries"] as! [[String: Any]]).count
+        try save(recovery, recoveryPath, raw("Recovery", body: "Third version"))
+        let history = try recovery.handle(method: "listHistory", params: ["path": recoveryPath])["entries"] as! [[String: Any]]
+        try expect(history.count == historyBeforeCoalescing, "Autosave history must coalesce within30seconds")
+        let originalHistory = history.first { $0["reason"] as? String == "created" }!
+        let originalID = originalHistory["id"] as! String
+        try queue(recovery, recoveryPath)
+        try rejects("History cannot replace an actively queued article") { _ = try recovery.handle(method: "restoreHistory", params: ["path": recoveryPath, "id": originalID, "expectedRevision": item(recovery, recoveryPath)["revision"]!]) }
+        _ = try recovery.handle(method: "cancelQueued", params: ["path": recoveryPath])
+        try rejects("History restoration must check the currently viewed revision") { _ = try recovery.handle(method: "restoreHistory", params: ["path": recoveryPath, "id": originalID, "expectedRevision": "stale"]) }
+        _ = try recovery.handle(method: "discardDraft", params: ["path": recoveryPath])
+        let globalHistory = try recovery.handle(method: "listHistory")["entries"] as! [[String: Any]]
+        try expect(globalHistory.contains { $0["path"] as? String == recoveryPath }, "Discarded articles must remain discoverable in global history")
+        let restoredHistory = try recovery.handle(method: "restoreHistory", params: ["path": recoveryPath, "id": originalID])
+        try expect(try item(recovery, recoveryPath)["rawContent"] as? String == firstVersion, "An absent article can be recovered from history")
+        try expect(status(restoredHistory)["queuedCount"] as? Int == 0, "History restore must not queue publication")
+        try rejects("History IDs cannot traverse the filesystem") { _ = try recovery.handle(method: "readHistory", params: ["path": recoveryPath, "id": "../../state"]) }
+
+        // Backup merging preserves existing drafts/queues; imported queued versions are inert recovery data.
+        let donorRoot = root.appendingPathComponent("donor-data")
+        let donor = RepositoryStore(root: donorRoot, remoteURL: remote.path, seedRepo: source, identity: identity)
+        _ = try donor.handle(method: "bootstrap")
+        _ = try donor.handle(method: "createArticle", params: ["path": recoveryPath, "rawContent": raw("Recovery", body: "Conflicting imported version")])
+        let importedPath = "_docs/2026-11-02-import-me.md"
+        let donorImage = try donor.handle(method: "importImage", params: ["filename": "backup-image.png", "base64": png])
+        let donorRaw = raw("Imported", body: "Queued in the old backup. ![Image](\(donorImage["path"] as! String))")
+        _ = try donor.handle(method: "createArticle", params: ["path": importedPath, "rawContent": donorRaw])
+        try queue(donor, importedPath)
+        try queue(recovery, recoveryPath)
+        let beforeRestoreQueue = try JSONSerialization.jsonObject(with: Data(contentsOf: recoveryRoot.appendingPathComponent("state.json"))) as! [String: Any]
+        let beforeRestoreHead = try git(["rev-parse", "main"], at: remote)
+        let backupData = try donor.exportBackup()
+        let backupSummary = try recovery.inspectBackup(backupData)
+        try expect(backupSummary["assetCount"] as? Int == 1, "Backup export must include staged assets through macOS temporary-path aliases")
+        try expect(backupSummary["existingDraftCollisions"] as? Int == 1, "Backup inspection must disclose existing draft collisions")
+        let backupImported = try recovery.restoreBackup(backupData)
+        try expect(try item(recovery, recoveryPath)["rawContent"] as? String == firstVersion, "Import must preserve the current local draft")
+        try expect(try item(recovery, importedPath)["rawContent"] as? String == donorRaw, "Nonconflicting imported drafts must be recoverable")
+        try expect(try item(recovery, importedPath)["isQueued"] as? Bool == false, "Imported queue entries must never become active")
+        try expect(status(backupImported)["queuedCount"] as? Int == 1, "Only the existing queue must remain active")
+        let afterRestoreState = try JSONSerialization.jsonObject(with: Data(contentsOf: recoveryRoot.appendingPathComponent("state.json"))) as! [String: Any]
+        try expect((beforeRestoreQueue["queue"] as! NSDictionary).isEqual(afterRestoreState["queue"]), "Backup import cannot alter existing queued snapshots")
+        try expect(try git(["rev-parse", "main"], at: remote) == beforeRestoreHead, "Backup restore must not publish anything")
+        let importedHistory = try recovery.handle(method: "listHistory", params: ["path": recoveryPath])["entries"] as! [[String: Any]]
+        try expect(importedHistory.contains { $0["reason"] as? String == "imported-conflict" }, "Conflicting imported draft must be retained in history")
+        try expect(try recovery.handle(method: "readAsset", params: ["path": donorImage["path"]!])["base64"] as? String == png, "Backup must restore staged images for offline preview")
+        var invalidBackup = try JSONSerialization.jsonObject(with: backupData) as! [String: Any]
+        invalidBackup["repository"] = "https://example.invalid/other.git"
+        try rejects("Backups for other repositories must be rejected") { _ = try recovery.inspectBackup(JSONSerialization.data(withJSONObject: invalidBackup)) }
+        invalidBackup = try JSONSerialization.jsonObject(with: backupData) as! [String: Any]
+        var badAssets = invalidBackup["assets"] as! [[String: Any]]
+        badAssets[0]["path"] = "images/uploads/../../../escape.png"; invalidBackup["assets"] = badAssets
+        try rejects("Backup asset traversal must be rejected") { _ = try recovery.restoreBackup(JSONSerialization.data(withJSONObject: invalidBackup)) }
+
+        // Failed restoration is transactional for new drafts, history, and staged assets.
+        let atomicPath = "_docs/2026-11-02-atomic-import.md"
+        _ = try donor.handle(method: "createArticle", params: ["path": atomicPath, "rawContent": raw("Atomic", body: "Must not partly restore")])
+        let atomicImage = try donor.handle(method: "importImage", params: ["filename": "atomic-image.png", "base64": png])
+        let atomicData = try donor.exportBackup()
+        let receiverState = recoveryRoot.appendingPathComponent("state.json")
+        let receiverSaved = recoveryRoot.appendingPathComponent("saved-state.json")
+        try fm.moveItem(at: receiverState, to: receiverSaved); try fm.createDirectory(at: receiverState, withIntermediateDirectories: false)
+        try rejects("A failed state write must abort backup restoration") { _ = try recovery.restoreBackup(atomicData) }
+        try fm.removeItem(at: receiverState); try fm.moveItem(at: receiverSaved, to: receiverState)
+        try rejects("An aborted backup cannot leave a new draft") { _ = try item(recovery, atomicPath) }
+        try expect(!fm.fileExists(atPath: recoveryRoot.appendingPathComponent("assets").appendingPathComponent(String((atomicImage["path"] as! String).dropFirst())).path), "Aborted restore must remove newly created staged assets")
+        try expect(try item(recovery, recoveryPath)["rawContent"] as? String == firstVersion, "Aborted restore must preserve existing local content")
+        let recoveryRestart = RepositoryStore(root: recoveryRoot, remoteURL: remote.path, identity: identity)
+        try expect(status(try recoveryRestart.handle(method: "bootstrap"))["queuedCount"] as? Int == 1, "Backup restore semantics must survive restart")
+
+        // Daily backups refresh after the throttle and retain20 dates independently from import checkpoints.
+        let backupsDirectory = recoveryRoot.appendingPathComponent("backups")
+        let daily = try fm.contentsOfDirectory(at: backupsDirectory, includingPropertiesForKeys: nil).first { !$0.lastPathComponent.hasPrefix("before-import-") }!
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -301)], ofItemAtPath: daily.path)
+        try save(recoveryRestart, importedPath, raw("Imported", body: "A newer meaningful draft change"))
+        let dailyContent = try JSONSerialization.jsonObject(with: Data(contentsOf: daily)) as! [String: Any]
+        let dailyState = dailyContent["state"] as! [String: Any]
+        try expect(((dailyState["drafts"] as! [String: Any])[importedPath] as! [String: Any])["rawContent"] as? String == raw("Imported", body: "A newer meaningful draft change"), "Today's snapshot must refresh with later meaningful changes")
+        for day in 1...25 { try Data("{}".utf8).write(to: backupsDirectory.appendingPathComponent(String(format: "2020-01-%02d.nightingale-backup.json", day))) }
+        _ = try recoveryRestart.handle(method: "cancelQueued", params: ["path": recoveryPath])
+        _ = try recoveryRestart.handle(method: "discardDraft", params: ["path": recoveryPath])
+        let retained = try fm.contentsOfDirectory(at: backupsDirectory, includingPropertiesForKeys: nil)
+        try expect(retained.filter { !$0.lastPathComponent.hasPrefix("before-import-") }.count == 20, "Daily retention must keep20 snapshots")
+        try expect(retained.contains { $0.lastPathComponent.hasPrefix("before-import-") }, "Import checkpoints must not displace daily backups")
+
+        for _ in 0..<105 { try queue(recoveryRestart, importedPath) }
+        let boundedHistory = try recoveryRestart.handle(method: "listHistory", params: ["path": importedPath])["entries"] as! [[String: Any]]
+        try expect(boundedHistory.count == 100, "Milestone history must retain at most100 versions per article")
+        _ = try recoveryRestart.handle(method: "cancelQueued", params: ["path": importedPath])
+
+        // Publication reports bind to the uploaded source and commit; source-only changes never mean Live.
+        let publisher = RepositoryStore(root: root.appendingPathComponent("publication-data"), remoteURL: remote.path, seedRepo: source, identity: identity)
+        _ = try publisher.handle(method: "bootstrap"); _ = try publisher.handle(method: "refresh")
+        let publicationPath = "_docs/2026-11-02-publication-status.md"
+        _ = try publisher.handle(method: "createArticle", params: ["path": publicationPath, "rawContent": raw("Publishing", body: "First uploaded revision")])
+        try queue(publisher, publicationPath); _ = try process(publisher)
+        let publication = try item(publisher, publicationPath)["publication"] as! [String: Any]
+        try expect(publication["status"] as? String == "uploaded", "A successful Git push is Uploaded, never implicitly Live")
+        try expect((publication["commit"] as? String)?.count == 40, "Publication must retain the uploaded commit")
+        var observation = publication; observation["status"] = "live"; observation["checkedAt"] = "2026-11-02T12:00:00Z"; observation["liveURL"] = "https://nightingalelyy.github.io/custom-publishing-route/"
+        _ = try publisher.applyDeploymentStatus(["results": [observation]])
+        let live = try item(publisher, publicationPath)["publication"] as! [String: Any]
+        try expect(live["status"] as? String == "live", "Verified manifest observation must mark the matching revision Live")
+        try expect(live["liveURL"] as? String == observation["liveURL"] as? String, "Verified same-site permalink must be retained")
+        var stale = observation; stale["sourceSHA256"] = String(repeating: "0", count: 64); stale["status"] = "failed"
+        _ = try publisher.applyDeploymentStatus(["results": [stale]])
+        try expect((try item(publisher, publicationPath)["publication"] as! [String: Any])["status"] as? String == "live", "Stale source-hash results cannot overwrite current publication state")
+        stale = observation; stale["commit"] = String(repeating: "0", count: 40); stale["status"] = "failed"
+        _ = try publisher.applyDeploymentStatus(["results": [stale]])
+        try expect((try item(publisher, publicationPath)["publication"] as! [String: Any])["status"] as? String == "live", "Stale commit results cannot overwrite publication state")
+        stale = observation; stale["liveURL"] = "https://example.invalid/phishing"; stale["status"] = "failed"
+        _ = try publisher.applyDeploymentStatus(["results": [stale]])
+        try expect((try item(publisher, publicationPath)["publication"] as! [String: Any])["status"] as? String == "live", "Deployment URLs outside the personal site must be rejected")
+        var failedObservation = observation; failedObservation["status"] = "failed"; failedObservation["checkedAt"] = "2026-11-02T12:01:00Z"
+        _ = try publisher.applyDeploymentStatus(["results": [failedObservation]])
+        try expect((try item(publisher, publicationPath)["publication"] as! [String: Any])["status"] as? String == "failed", "A matching failed deployment must be represented honestly")
+        try save(publisher, publicationPath, raw("Publishing", body: "A newer local-only draft"))
+        try expect((try item(publisher, publicationPath)["publication"] as! [String: Any])["matchesCurrentRevision"] as? Bool == false, "A newer local draft must not inherit the earlier revision's Live badge")
+
+        // Validate both the queued version and refreshed publication snapshot; validation failures never push.
+        var allowValidation = false
+        var validationCalls: [[String: Any]] = []
+        let guarded = RepositoryStore(root: root.appendingPathComponent("validation-data"), remoteURL: remote.path, seedRepo: source, identity: identity, validation: { payload in
+            validationCalls.append(payload)
+            return ["ok": allowValidation, "issues": allowValidation ? [] : [["severity": "error", "message": "Invalid fixture"]], "summary": ["documents": 1, "codeBlocks": 0]]
+        })
+        _ = try guarded.handle(method: "bootstrap"); _ = try guarded.handle(method: "refresh")
+        let guardedPath = "_docs/2026-11-02-validation-gate.md"
+        let guardedRaw = raw("Validation", body: "An exact queued snapshot")
+        _ = try guarded.handle(method: "createArticle", params: ["path": guardedPath, "rawContent": guardedRaw])
+        try rejects("Validation errors must stop queueing") { try queue(guarded, guardedPath) }
+        allowValidation = true
+        try rejects("A stale validated editor revision must not queue") { _ = try guarded.handle(method: "queuePublish", params: ["path": guardedPath, "expectedRevision": "stale"]) }
+        try queue(guarded, guardedPath)
+        try save(guarded, guardedPath, raw("Validation", body: "A later unqueued edit"))
+        allowValidation = false
+        let preBlockedHead = try git(["rev-parse", "main"], at: remote)
+        let blocked = try process(guarded)
+        try expect(status(blocked)["queuedCount"] as? Int == 1, "A blocked publication must retain its queue snapshot")
+        try expect(try git(["rev-parse", "main"], at: remote) == preBlockedHead, "Publish-time validation failure must leave remote unchanged")
+        let validatedDocuments = validationCalls.last!["documents"] as! [[String: Any]]
+        try expect(validatedDocuments[0]["rawContent"] as? String == guardedRaw, "Publish-time validation must use the queued version, not later local edits")
+
+        // Corrupt state opens a read-only library and is never silently replaced with empty data.
+        let corruptRoot = root.appendingPathComponent("corrupt-state-data")
+        let seedCorrupt = RepositoryStore(root: corruptRoot, remoteURL: remote.path, seedRepo: source, identity: identity)
+        _ = try seedCorrupt.handle(method: "bootstrap")
+        let corruptFile = corruptRoot.appendingPathComponent("state.json")
+        let corruptBytes = Data("{broken local draft storage\\n".utf8)
+        try corruptBytes.write(to: corruptFile)
+        let recoveringStore = RepositoryStore(root: corruptRoot, remoteURL: remote.path, seedRepo: source, identity: identity)
+        let recoveryBootstrap = try recoveringStore.handle(method: "bootstrap")
+        try expect((recoveryBootstrap["recovery"] as! [String: Any])["needsRestore"] as? Bool == true, "Corrupt storage must enter explicit recovery mode")
+        try expect(!all(recoveryBootstrap).isEmpty, "Published library must remain readable during recovery")
+        try expect(try Data(contentsOf: corruptFile) == corruptBytes, "Bootstrap must preserve corrupt bytes exactly")
+        for method in ["createCategory", "createArticle", "processQueue", "refresh", "discardDraft", "restoreHistory", "importImage"] {
+            try rejects("Recovery must block mutation: \(method)") { _ = try recoveringStore.handle(method: method) }
+        }
+        try rejects("Recovery export must not produce a misleading empty backup") { _ = try recoveringStore.exportBackup() }
+        _ = try recoveringStore.applyDeploymentStatus(["results": []])
+        try expect(try Data(contentsOf: corruptFile) == corruptBytes, "Deployment polling must not rewrite unreadable state")
+        _ = try recoveringStore.inspectBackup(backupData)
+        try rejects("Invalid recovery backup must be rejected") { _ = try recoveringStore.restoreBackup(Data("{}".utf8)) }
+        try expect(try Data(contentsOf: corruptFile) == corruptBytes, "Invalid restore must leave original corrupt bytes intact")
+        // Force a staging failure after the private checkpoint, before the atomic state commit.
+        let blockedHistory = corruptRoot.appendingPathComponent("history")
+        try Data("not a directory".utf8).write(to: blockedHistory)
+        try rejects("A staged recovery failure must not replace unreadable state") { _ = try recoveringStore.restoreBackup(backupData) }
+        try expect(try Data(contentsOf: corruptFile) == corruptBytes, "Recovery failure must preserve original state bytes")
+        try expect((try recoveringStore.handle(method: "bootstrap")["recovery"] as! [String: Any])["needsRestore"] as? Bool == true, "Failed recovery must stay read-only")
+        try fm.removeItem(at: blockedHistory)
+        let beforeRecoveryHead = try git(["rev-parse", "main"], at: remote)
+        let recoveredBackup = try recoveringStore.restoreBackup(backupData)
+        try expect((recoveredBackup["recovery"] as! [String: Any])["needsRestore"] as? Bool == false, "A successful valid restore must leave recovery mode")
+        try expect(status(recoveredBackup)["queuedCount"] as? Int == 0, "Corrupt-state recovery must never reactivate imported queues")
+        try expect(try item(recoveringStore, importedPath)["rawContent"] as? String == donorRaw, "Recovered draft must match the chosen backup")
+        let checkpoint = (recoveredBackup["backupResult"] as! [String: Any])["corruptStateCheckpoint"] as! String
+        try expect(try Data(contentsOf: URL(fileURLWithPath: checkpoint)) == corruptBytes, "Original unreadable bytes must remain recoverable after success")
+        let checkpointPermissions = try fm.attributesOfItem(atPath: checkpoint)[.posixPermissions] as! NSNumber
+        try expect(checkpointPermissions.intValue & 0o777 == 0o600, "The corrupt-state checkpoint must be private")
+        try expect(try git(["rev-parse", "main"], at: remote) == beforeRecoveryHead, "Recovery must not publish any article")
+        let recoveredRestart = RepositoryStore(root: corruptRoot, remoteURL: remote.path, identity: identity)
+        try expect((try recoveredRestart.handle(method: "bootstrap")["recovery"] as! [String: Any])["needsRestore"] as? Bool == false, "Recovered valid storage must load normally after restart")
+
         print("RepositoryStore integration tests passed: \(assertions) assertions")
-        print("Covered offline restart, safe saves, immutable queued versions, publish, conflicts, explicit resolution, new-file collision, raster assets, scoped writes, path validation, and local category migration/persistence.")
+        print("Covered offline drafts and snapshots, conflicts, assets and paths, state migration, bounded history, safe backup import/export, automatic backups, publication verification, and publish-time validation.")
     }
 }

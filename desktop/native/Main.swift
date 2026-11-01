@@ -28,6 +28,10 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     private var webView: WKWebView!
     private var store: RepositoryStore!
     private var codeHighlighter: CodeHighlighter!
+    private var publishingValidator: PublishingValidator!
+    private let deploymentClient = DeploymentClient()
+    private let deploymentWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.deployment")
+    private var pendingBackup: (token: String, data: Data)?
     private let worker = DispatchQueue(label: "io.github.nightingalelyy.writer.storage")
     private let highlightWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.highlight", qos: .userInitiated)
     private var allowClose = false
@@ -39,7 +43,11 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let root = support.appendingPathComponent("Nightingale Writer", isDirectory: true)
         let seed = Bundle.main.resourceURL?.appendingPathComponent("Seed.git", isDirectory: true)
-        store = RepositoryStore(root: root, seedRepo: seed)
+        publishingValidator = PublishingValidator(resources: Bundle.main.resourceURL!)
+        store = RepositoryStore(root: root, seedRepo: seed, validation: { [weak self] payload in
+            guard let validator = self?.publishingValidator else { throw NSError(domain: "Writer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Publishing checks are unavailable."]) }
+            return try validator.validate(payload)
+        })
         codeHighlighter = CodeHighlighter(resources: Bundle.main.resourceURL!)
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(source: bridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
@@ -116,6 +124,27 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         if method == "chooseImage" { chooseImage(id: id); return }
         if method == "openCMS" { openCMS(); respond(id, result: [:]); return }
         if method == "openSite" { openSite(); respond(id, result: [:]); return }
+        if method == "exportBackup" { exportBackup(id: id); return }
+        if method == "chooseBackup" { chooseBackup(id: id); return }
+        if method == "cancelBackupImport" { pendingBackup = nil; respond(id, result: [:]); return }
+        if method == "restoreBackup" {
+            guard let token = params["token"] as? String, let pending = pendingBackup, pending.token == token else { respond(id, error: "Choose the backup again before restoring it."); return }
+            pendingBackup = nil
+            worker.async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    let result = try self.store.restoreBackup(pending.data)
+                    DispatchQueue.main.async { self.respond(id, result: result) }
+                } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
+            }
+            return
+        }
+        if method == "pollPublicationStatus" { pollPublicationStatus(id: id); return }
+        if method == "openExternal" {
+            guard let raw = params["url"] as? String, let url = URL(string: raw), url.scheme == "https", url.user == nil, url.password == nil,
+                  url.host == "nightingalelyy.github.io" || (url.host == "github.com" && url.path.lowercased().hasPrefix("/nightingalelyy/nightingalelyy.github.io/actions/")) else { respond(id, error: "This is not a website or build link."); return }
+            NSWorkspace.shared.open(url); respond(id, result: [:]); return
+        }
         if method == "highlightCode" {
             highlightWorker.async { [weak self] in
                 guard let self = self else { return }
@@ -128,7 +157,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             }
             return
         }
-        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "refresh", "queuePublish", "processQueue", "resolveConflict", "importImage", "readAsset", "cancelQueued", "discardDraft"]
+        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "refresh", "queuePublish", "processQueue", "resolveConflict", "importImage", "readAsset", "cancelQueued", "discardDraft", "validatePublication", "listHistory", "readHistory", "restoreHistory"]
         guard allowed.contains(method) else { respond(id, error: "Unknown operation."); return }
         worker.async { [weak self] in
             guard let self = self else { return }
@@ -138,6 +167,73 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             } catch {
                 let text = error.localizedDescription
                 DispatchQueue.main.async { self.respond(id, error: text) }
+            }
+        }
+    }
+
+    private func pollPublicationStatus(id: String) {
+        worker.async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let targets = try self.store.deploymentTargets()
+                self.deploymentWorker.async {
+                    let report = self.deploymentClient.poll(targets)
+                    self.worker.async {
+                        do {
+                            let result = try self.store.applyDeploymentStatus(report)
+                            DispatchQueue.main.async { self.respond(id, result: result) }
+                        } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
+                    }
+                }
+            } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
+        }
+    }
+
+    private func exportBackup(id: String) {
+        let panel = NSSavePanel()
+        panel.title = "Export Nightingale Writer Backup"
+        panel.message = "Includes unpublished drafts, images, and history. Keep this file in a private location."
+        let dateFormatter = DateFormatter(); dateFormatter.locale = Locale(identifier: "en_US_POSIX"); dateFormatter.dateFormat = "yyyy-MM-dd"
+        panel.nameFieldStringValue = "Nightingale Writer Backup \(dateFormatter.string(from: Date())).json"
+        panel.allowedContentTypes = [.json]
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self = self else { return }
+            guard response == .OK, let url = panel.url else { self.respond(id, result: ["cancelled": true]); return }
+            self.worker.async {
+                do {
+                    let data = try self.store.exportBackup()
+                    try data.write(to: url, options: .atomic)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+                    DispatchQueue.main.async { self.respond(id, result: ["fileName": url.lastPathComponent]) }
+                } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
+            }
+        }
+    }
+
+    private func chooseBackup(id: String) {
+        pendingBackup = nil
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Nightingale Writer Backup"
+        panel.allowedContentTypes = [.json]
+        let backups = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Nightingale Writer/backups", isDirectory: true)
+        if FileManager.default.fileExists(atPath: backups.path) { panel.directoryURL = backups }
+        panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self = self else { return }
+            guard response == .OK, let url = panel.url else { self.respond(id, result: ["cancelled": true]); return }
+            self.worker.async {
+                do {
+                    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                    guard size <= 256 * 1024 * 1024 else { throw NSError(domain: "Writer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Choose a backup smaller than 256 MB."]) }
+                    let data = try Data(contentsOf: url)
+                    var summary = try self.store.inspectBackup(data)
+                    summary["fileName"] = url.lastPathComponent
+                    let token = UUID().uuidString
+                    DispatchQueue.main.async {
+                        self.pendingBackup = (token, data)
+                        self.respond(id, result: ["token": token, "summary": summary])
+                    }
+                } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
             }
         }
     }

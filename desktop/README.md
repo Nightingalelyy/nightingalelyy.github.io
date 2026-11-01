@@ -16,11 +16,19 @@ library is available on the first launch without an internet connection.
    Inserted images are also stored locally.
 4. Choose **Publish** when a saved version is ready to go online.
 
+Publishing first checks the exact saved version for invalid metadata, accidental
+template expressions, missing local images, and broken internal links. Errors
+show a file and line number; the draft remains on this Mac until they are fixed.
+The same checks run on GitHub for changes made through Pages CMS.
+
 Publishing queues the selected version. If GitHub cannot be reached, the queue
 stays on disk and retries while the app is open. Later edits remain local until
 you choose Publish again. The app does not run a background service when closed.
-Publishing to GitHub starts the site's existing GitHub Pages build; it is not an
-instant deployment.
+The article progresses through **Queued**, **Uploaded**, **Building**, and
+**Live**. **Failed** links to the build details. Live is confirmed by the deployed
+website's source hash, including when a newer site build still contains the same
+article. New edits remain a local draft while an earlier version is building.
+If status cannot be refreshed, the app preserves the last verified time.
 
 **Refresh** downloads changes made through Pages CMS. If the same article changed
 online and locally, publication stops for review. The app retains the base,
@@ -55,6 +63,32 @@ so Jekyll-only features such as Liquid can differ from the Markdown preview.
 
 Keyboard shortcuts: **⌘N** new article, **⌘S** save locally, **⌘R** refresh,
 **⇧⌘P** publish. Closing the app waits for pending local saves.
+
+## History and backups
+
+Open **Article history** in the document toolbar to compare a saved revision
+with the current article. **History & recovery** in the sidebar also shows
+discarded drafts. **Restore as local draft** keeps a recovery copy of the current
+work and does not publish. Cancel an existing queued publication before restoring
+that article. History retains up to 100 revisions per article; rapid autosaves
+are grouped to avoid filling the list with every keystroke.
+
+**Backups** exports local drafts, images, categories, queued snapshots, and history
+to a JSON file. Store this file privately: it contains unpublished writing and
+is not encrypted. To restore, choose the file, review its contents, and select
+**Restore locally**. Existing local drafts are preserved; conflicting imported
+versions appear in history. Imported queued versions become drafts or history,
+and never publish automatically. A checkpoint is saved before importing.
+
+Automatic backups keep 20 daily snapshots, refreshing today's copy at most once
+every five minutes when local writing changes. Recovery operations force a
+checkpoint. Backups on the same disk help with accidental changes; export a copy
+to a separate private location for protection if this Mac is lost or its disk fails.
+
+If local draft storage cannot be decoded, the app opens the cached library in
+read-only recovery mode. Use **Open Backups** to select a valid backup and review
+the restore. The damaged state file is preserved in a private recovery checkpoint;
+editing resumes only after restoration succeeds.
 
 ## Local storage and credentials
 

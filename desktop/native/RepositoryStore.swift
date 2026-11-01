@@ -28,6 +28,17 @@ private struct WriterConflict: Codable {
     var remoteBlob: String?
 }
 
+private struct WriterPublication: Codable {
+    var sourceSHA256: String
+    var commit: String?
+    var status: String
+    var liveURL: String
+    var workflowURL: String?
+    var checkedAt: String?
+    var uploadedAt: String?
+    var message: String?
+}
+
 private struct WriterState: Codable {
     var version = 1
     var drafts: [String: WriterDraft] = [:]
@@ -35,6 +46,7 @@ private struct WriterState: Codable {
     var conflicts: [String: WriterConflict] = [:]
     // Optional so state written before local categories were introduced still decodes.
     var categories: [String]?
+    var publications: [String: WriterPublication]?
     var state = "ready"
     var message = "Ready to write offline."
     var lastSyncedAt: String?
@@ -61,31 +73,48 @@ final class RepositoryStore {
     private let remoteURL: String
     private let seedRepo: URL?
     private let identity: (name: String, email: String)?
+    private let validation: (([String: Any]) throws -> [String: Any])?
     private let fm = FileManager.default
     private var state = WriterState()
     private var durableState = WriterState()
     private var articles: [String: RepositoryArticle] = [:]
     private var cachedCommit: String?
     private var initialized = false
+    private var pendingHistoryPrunes = Set<String>()
+    private var backupWarning: String?
+    private var needsRestore = false
+    private var corruptStateBytes: Data?
+    private var recoveryWriteInProgress = false
+    private let standardDates = ISO8601DateFormatter()
+    private let fractionalDates: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private let maxBackupBytes = 256 * 1024 * 1024
 
     init(root: URL, remoteURL: String = RepositoryStore.productionRemote,
-         seedRepo: URL? = nil, identity: (name: String, email: String)? = nil) {
+         seedRepo: URL? = nil, identity: (name: String, email: String)? = nil,
+         validation: (([String: Any]) throws -> [String: Any])? = nil) {
         self.root = root.standardizedFileURL
         self.remoteURL = remoteURL
         self.seedRepo = seedRepo
         self.identity = identity
+        self.validation = validation
     }
 
     private var repository: URL { root.appendingPathComponent("repository.git", isDirectory: true) }
     private var stateFile: URL { root.appendingPathComponent("state.json") }
     private var assetsRoot: URL { root.appendingPathComponent("assets", isDirectory: true) }
     private var remoteRef: String { "refs/remotes/origin/main" }
-    private func now() -> String { ISO8601DateFormatter().string(from: Date()) }
+    private func now() -> String { standardDates.string(from: Date()) }
     private func digest(_ value: String) -> String { SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined() }
     private func fail(_ message: String) -> RepositoryStoreError { RepositoryStoreError(message: message) }
 
     func handle(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
         try initialize()
+        if needsRestore && !["bootstrap", "status", "listArticles", "readArticle", "listHistory", "readHistory", "readAsset"].contains(method) {
+            throw fail("Local draft storage needs recovery. Restore a valid backup before editing or publishing.")
+        }
         switch method {
         case "bootstrap", "status", "listArticles": return try bootstrap()
         case "createCategory":
@@ -105,6 +134,22 @@ final class RepositoryStore {
             var result = try bootstrap()
             result["category"] = canonical
             return result
+        case "listHistory": return ["entries": try historyEntries(path: params["path"] as? String, includeContent: false)]
+        case "readHistory": return try historyEntry(path: string(params, "path"), id: string(params, "id"))
+        case "restoreHistory":
+            let path = try string(params, "path")
+            guard state.queue[path] == nil else { throw fail("Cancel queued publication before restoring a version.") }
+            let entry = try historyEntry(path: path, id: string(params, "id"))
+            let content = entry["rawContent"] as! String
+            if let current = state.drafts[path]?.rawContent ?? articles[path]?.rawContent {
+                guard params["expectedRevision"] as? String == digest(current) else { throw fail("The article changed. Reload it before restoring a version.") }
+                try archiveContent(path: path, content: current, reason: "before-restore")
+            } else if params["expectedRevision"] != nil { throw fail("This article no longer exists. Reload its history before restoring.") }
+            try automaticBackup(force: true)
+            state.drafts[path] = WriterDraft(rawContent: content, baseBlob: articles[path]?.blob, baseContent: articles[path]?.rawContent, updatedAt: now())
+            state.conflicts.removeValue(forKey: path)
+            state.state = "local"; state.message = "Version restored locally. Choose Publish when ready."
+            try persist(); return try bootstrap()
         case "readArticle": return try articleJSON(path: string(params, "path"))
         case "saveDraft":
             return try saveDraft(path: string(params, "path"), raw: string(params, "rawContent"),
@@ -115,6 +160,7 @@ final class RepositoryStore {
             guard articles[path] == nil, state.drafts[path] == nil else { throw fail("An article already exists at this path. Choose another filename.") }
             let raw = try string(params, "rawContent")
             try validateArticleContent(raw)
+            try archiveContent(path: path, content: raw, reason: "created")
             state.drafts[path] = WriterDraft(rawContent: raw, baseBlob: nil, baseContent: nil, updatedAt: now())
             state.state = "local"; state.message = "Article saved on this Mac."
             try persist()
@@ -123,7 +169,7 @@ final class RepositoryStore {
             let path = try string(params, "path")
             try validateArticlePath(path)
             guard state.queue[path] == nil else { throw fail("Cancel the queued publication before discarding this draft.") }
-            if let draft = state.drafts[path] { try archive(path: path, draft: draft) }
+            if let draft = state.drafts[path] { try automaticBackup(force: true); try archive(path: path, draft: draft) }
             state.drafts.removeValue(forKey: path); state.conflicts.removeValue(forKey: path)
             state.state = "ready"; state.message = "Local draft discarded. A recovery copy is saved on this Mac."
             try persist(); return try bootstrap()
@@ -143,11 +189,22 @@ final class RepositoryStore {
                 state.message = "GitHub publishing credentials verified. No changes were published."
             } catch { networkFailure(error) }
             try persist(); return try bootstrap()
+        case "validatePublication":
+            let path = try string(params, "path")
+            try validateArticlePath(path)
+            guard let raw = state.drafts[path]?.rawContent ?? articles[path]?.rawContent else { throw fail("Article not found.") }
+            if let expected = params["expectedRevision"] as? String, expected != digest(raw) { throw fail("The article changed. Save and validate the current version.") }
+            var report = try validationReport(path: path, raw: raw)
+            report["revision"] = digest(raw)
+            return report
         case "queuePublish":
             let path = try string(params, "path")
             try validateArticlePath(path)
             guard let draft = state.drafts[path] else { throw fail("There are no local changes to publish for this article.") }
             guard state.conflicts[path] == nil else { throw fail("Resolve the conflicting edits before publishing this article.") }
+            if let expected = params["expectedRevision"] as? String, expected != digest(draft.rawContent) { throw fail("The article changed. Save and validate the current version before publishing.") }
+            try requireValidPublication(path: path, raw: draft.rawContent)
+            try archiveContent(path: path, content: draft.rawContent, reason: "queued")
             state.queue[path] = WriterQueueEntry(rawContent: draft.rawContent, baseBlob: draft.baseBlob,
                                                 baseContent: draft.baseContent, queuedAt: now())
             state.state = "queued"; state.message = "Publication queued. Only this saved version will be published."
@@ -189,8 +246,13 @@ final class RepositoryStore {
         if initialized { return }
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         if fm.fileExists(atPath: stateFile.path) {
-            do { state = try JSONDecoder().decode(WriterState.self, from: Data(contentsOf: stateFile)) }
-            catch { throw fail("Local draft storage could not be read. It has been preserved at \(stateFile.path).") }
+            let original = try Data(contentsOf: stateFile)
+            do { state = try JSONDecoder().decode(WriterState.self, from: original) }
+            catch {
+                corruptStateBytes = original; needsRestore = true
+                state = WriterState(); state.state = "recovery"
+                state.message = "Local draft storage could not be read. It is preserved unchanged. Restore a backup to resume editing."
+            }
         }
         durableState = state
         if !fm.fileExists(atPath: repository.path) {
@@ -213,11 +275,13 @@ final class RepositoryStore {
         guard try git(["rev-parse", "--is-bare-repository"], at: repository).text.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else { throw fail("The application repository must be bare.") }
         try reloadArticles()
         initialized = true
-        try persist()
+        if !needsRestore { try persist() }
     }
 
     private func persist() throws {
+        guard !needsRestore || recoveryWriteInProgress else { throw fail("Restore a valid backup before changing local storage.") }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let meaningful = try workFingerprint(state) != workFingerprint(durableState)
         do {
             try encoder.encode(state).write(to: stateFile, options: .atomic)
             durableState = state
@@ -225,13 +289,348 @@ final class RepositoryStore {
             state = durableState
             throw fail("Could not save local changes to disk. Your last saved version is intact. Free disk space or check folder permissions, then retry.")
         }
+        for path in pendingHistoryPrunes { try? pruneHistory(path: path) }
+        pendingHistoryPrunes.removeAll()
+        if meaningful {
+            do { try automaticBackup(); backupWarning = nil }
+            catch { backupWarning = "Local work was saved, but the automatic backup could not be written." }
+        }
     }
 
     private func archive(path: String, draft: WriterDraft) throws {
-        let dir = root.appendingPathComponent("history/\(digest(path))", isDirectory: true)
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        let entry: [String: Any] = ["path": path, "rawContent": draft.rawContent, "savedAt": now()]
-        try JSONSerialization.data(withJSONObject: entry, options: [.prettyPrinted]).write(to: dir.appendingPathComponent("\(UUID().uuidString).json"), options: .atomic)
+        try archiveContent(path: path, content: draft.rawContent, reason: "recovery")
+    }
+
+    private func historyDate(_ value: String) -> Date {
+        return fractionalDates.date(from: value) ?? standardDates.date(from: value) ?? .distantPast
+    }
+
+    @discardableResult
+    private func archiveContent(path: String, content: String, reason: String, coalesce: Bool = false) throws -> URL? {
+        try validateArticlePath(path); try validateArticleContent(content)
+        let previous = try historyEntries(path: path, includeContent: false)
+        if coalesce, let first = previous.first,
+           Date().timeIntervalSince(historyDate(first["savedAt"] as? String ?? "")) < 30 { return nil }
+        if coalesce, previous.first?["revision"] as? String == digest(content) { return nil }
+        let directory = root.appendingPathComponent("history/\(digest(path))", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let id = UUID().uuidString
+        let entry: [String: Any] = ["id": id, "path": path, "rawContent": content, "savedAt": fractionalDates.string(from: Date()), "reason": reason, "revision": digest(content)]
+        let file = directory.appendingPathComponent(id + ".json")
+        try JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]).write(to: file, options: .atomic)
+        pendingHistoryPrunes.insert(path)
+        return file
+    }
+
+    private func historyEntry(path: String, id: String) throws -> [String: Any] {
+        try validateArticlePath(path)
+        guard UUID(uuidString: id) != nil else { throw fail("Invalid history version.") }
+        let file = try safeExisting("history/\(digest(path))/\(id).json", inside: root)
+        let data = try Data(contentsOf: file)
+        guard data.count <= 6 * 1024 * 1024, var entry = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              entry["path"] as? String == path, let content = entry["rawContent"] as? String else { throw fail("This history version could not be read.") }
+        try validateArticleContent(content)
+        entry["id"] = id; entry["revision"] = digest(content)
+        entry["reason"] = entry["reason"] as? String ?? "recovery"
+        entry["savedAt"] = entry["savedAt"] as? String ?? ""
+        return entry
+    }
+
+    private func historyEntries(path: String?, includeContent: Bool) throws -> [[String: Any]] {
+        if let path { try validateArticlePath(path) }
+        let historyRoot = root.appendingPathComponent("history", isDirectory: true)
+        guard fm.fileExists(atPath: historyRoot.path) else { return [] }
+        let directories: [URL]
+        if let path { directories = [historyRoot.appendingPathComponent(digest(path))] }
+        else { directories = try fm.contentsOfDirectory(at: historyRoot, includingPropertiesForKeys: [.isSymbolicLinkKey], options: [.skipsHiddenFiles]) }
+        var entries: [[String: Any]] = []
+        for directory in directories where fm.fileExists(atPath: directory.path) {
+            guard (try directory.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else { throw fail("History cannot contain symbolic links.") }
+            for file in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) where file.pathExtension == "json" {
+                let id = file.deletingPathExtension().lastPathComponent
+                guard UUID(uuidString: id) != nil else { continue }
+                let safeFile = try safeExisting("history/\(directory.lastPathComponent)/\(file.lastPathComponent)", inside: root)
+                let data = try Data(contentsOf: safeFile)
+                guard data.count <= 6 * 1024 * 1024, let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], let entryPath = value["path"] as? String,
+                      directory.lastPathComponent == digest(entryPath) else { throw fail("A history record is invalid.") }
+                var entry = try historyEntry(path: entryPath, id: id)
+                if !includeContent { entry.removeValue(forKey: "rawContent") }
+                entries.append(entry)
+            }
+        }
+        return entries.map { ($0, historyDate($0["savedAt"] as? String ?? "")) }.sorted { $0.1 > $1.1 }.map { $0.0 }
+    }
+
+    private func pruneHistory(path: String) throws {
+        let entries = try historyEntries(path: path, includeContent: false)
+        for entry in entries.dropFirst(100) {
+            if let id = entry["id"] as? String { try fm.removeItem(at: root.appendingPathComponent("history/\(digest(path))/\(id).json")) }
+        }
+    }
+
+    private func workFingerprint(_ value: WriterState) throws -> Data {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(value.drafts) + encoder.encode(value.queue) + encoder.encode(value.categories)
+    }
+
+    func exportBackup() throws -> Data {
+        try initialize()
+        guard !needsRestore else { throw fail("Restore a valid backup before exporting. The original unreadable storage file is preserved.") }
+        let encodedState = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state))
+        var assets: [[String: Any]] = []
+        if let enumerator = fm.enumerator(at: assetsRoot, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]) {
+            for case let file as URL in enumerator {
+                let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                guard values.isSymbolicLink != true else { throw fail("Backup assets cannot contain symbolic links.") }
+                guard values.isRegularFile == true else { continue }
+                let filePath = file.resolvingSymlinksInPath().path
+                let basePath = assetsRoot.resolvingSymlinksInPath().path
+                guard filePath.hasPrefix(basePath + "/") else { throw fail("A backup image is outside local asset storage.") }
+                let path = String(filePath.dropFirst(basePath.count + 1))
+                guard path.hasPrefix("images/uploads/") else { continue }
+                let data = try Data(contentsOf: safeExisting(path, inside: assetsRoot))
+                guard data.count <= 20 * 1024 * 1024 else { throw fail("A backup image exceeds the 20 MB limit.") }
+                assets.append(["path": path, "base64": data.base64EncodedString(), "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()])
+            }
+        }
+        let payload: [String: Any] = ["format": "nightingale-writer-backup", "formatVersion": 1, "createdAt": now(), "repository": remoteURL,
+                                     "state": encodedState, "assets": assets, "history": try historyEntries(path: nil, includeContent: true)]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        guard data.count <= maxBackupBytes else { throw fail("The local backup exceeds the 256 MB limit. Your working data is unchanged.") }
+        return data
+    }
+
+    private func validatedBackup(_ data: Data) throws -> (WriterState, [[String: Any]], [(String, Data)], String) {
+        guard data.count <= maxBackupBytes, let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              payload["format"] as? String == "nightingale-writer-backup", payload["formatVersion"] as? Int == 1,
+              payload["repository"] as? String == remoteURL, let stateObject = payload["state"],
+              let histories = payload["history"] as? [[String: Any]], histories.count <= 50000,
+              let images = payload["assets"] as? [[String: Any]], images.count <= 10000 else { throw fail("Choose a valid Nightingale Writer backup for this repository (up to 256 MB).") }
+        let restored = try JSONDecoder().decode(WriterState.self, from: JSONSerialization.data(withJSONObject: stateObject))
+        guard restored.version == 1, restored.drafts.count <= 10000, restored.queue.count <= 10000 else { throw fail("This backup version or size is unsupported.") }
+        for (path, draft) in restored.drafts { try validateArticlePath(path); try validateArticleContent(draft.rawContent) }
+        for (path, queued) in restored.queue { try validateArticlePath(path); try validateArticleContent(queued.rawContent) }
+        for name in restored.categories ?? [] {
+            guard !name.isEmpty, name.count <= 80, !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) else { throw fail("A backup category is invalid.") }
+        }
+        for entry in histories {
+            guard let path = entry["path"] as? String, let raw = entry["rawContent"] as? String else { throw fail("A backup history entry is invalid.") }
+            try validateArticlePath(path); try validateArticleContent(raw)
+        }
+        var assets: [(String, Data)] = []; var names = Set<String>()
+        for image in images {
+            guard let path = image["path"] as? String, path.hasPrefix("images/uploads/"), let encoded = image["base64"] as? String,
+                  let bytes = Data(base64Encoded: encoded), !bytes.isEmpty, bytes.count <= 20 * 1024 * 1024,
+                  imageMIME((path as NSString).pathExtension) != nil else { throw fail("A backup image is invalid.") }
+            try validateRelative(path)
+            let normalizedPath = path.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            guard names.insert(normalizedPath).inserted else { throw fail("A backup contains duplicate image paths.") }
+            let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            guard image["sha256"] as? String == hash else { throw fail("A backup image failed its integrity check.") }
+            if fm.fileExists(atPath: assetsRoot.appendingPathComponent(path).path) {
+                guard try Data(contentsOf: safeExisting(path, inside: assetsRoot)) == bytes else { throw fail("A backup image conflicts with an existing local image. Nothing was restored.") }
+            }
+            assets.append((path, bytes))
+        }
+        return (restored, histories, assets, payload["createdAt"] as? String ?? "")
+    }
+
+    func inspectBackup(_ data: Data) throws -> [String: Any] {
+        try initialize()
+        let (restored, history, assets, createdAt) = try validatedBackup(data)
+        return ["formatVersion": 1, "createdAt": createdAt, "draftCount": restored.drafts.count, "queuedCount": restored.queue.count,
+                "categoryCount": restored.categories?.count ?? 0, "assetCount": assets.count, "historyCount": history.count, "bytes": data.count,
+                "existingDraftCollisions": restored.drafts.filter { path, draft in state.drafts[path] != nil && state.drafts[path]?.rawContent != draft.rawContent }.count]
+    }
+
+    func restoreBackup(_ data: Data) throws -> [String: Any] {
+        try initialize()
+        let (restored, histories, assets, _) = try validatedBackup(data)
+        let previous = state
+        let recovering = needsRestore
+        var corruptCheckpoint: String?
+        if recovering {
+            guard let original = corruptStateBytes, try Data(contentsOf: stateFile) == original else { throw fail("Local storage changed since recovery started. Restart the app before restoring a backup.") }
+            let directory = root.appendingPathComponent("recovery", isDirectory: true)
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let timestamp = now().replacingOccurrences(of: ":", with: "-")
+            let file = directory.appendingPathComponent("\(timestamp)-\(UUID().uuidString).corrupt-state.json")
+            try original.write(to: file, options: .atomic)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            corruptCheckpoint = file.path
+        } else {
+            let backupDirectory = root.appendingPathComponent("backups", isDirectory: true)
+            try fm.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+            try exportBackup().write(to: backupDirectory.appendingPathComponent("before-import-\(UUID().uuidString).nightingale-backup.json"), options: .atomic)
+            try pruneBackups()
+        }
+        var createdFiles: [URL] = []
+        var draftsAdded = 0, versionsAdded = 0
+        do {
+            try fm.createDirectory(at: assetsRoot, withIntermediateDirectories: true)
+            for (path, bytes) in assets where !fm.fileExists(atPath: assetsRoot.appendingPathComponent(path).path) {
+                let destination = try safeDestination(path, inside: assetsRoot)
+                try bytes.write(to: destination, options: .atomic); createdFiles.append(destination)
+            }
+            for (path, draft) in restored.drafts {
+                if state.drafts[path] == nil && state.queue[path] == nil {
+                    state.drafts[path] = draft; draftsAdded += 1
+                } else if state.drafts[path]?.rawContent != draft.rawContent {
+                    if let file = try archiveContent(path: path, content: draft.rawContent, reason: "imported-conflict") { createdFiles.append(file); versionsAdded += 1 }
+                }
+            }
+            for (path, queued) in restored.queue {
+                if state.drafts[path] == nil && state.queue[path] == nil {
+                    state.drafts[path] = WriterDraft(rawContent: queued.rawContent, baseBlob: queued.baseBlob, baseContent: queued.baseContent, updatedAt: now()); draftsAdded += 1
+                } else if state.drafts[path]?.rawContent != queued.rawContent {
+                    if let file = try archiveContent(path: path, content: queued.rawContent, reason: "imported-queued-version") { createdFiles.append(file); versionsAdded += 1 }
+                }
+            }
+            for entry in histories {
+                let path = entry["path"] as! String, raw = entry["rawContent"] as! String
+                let known = try historyEntries(path: path, includeContent: false)
+                if !known.contains(where: { $0["revision"] as? String == digest(raw) }) {
+                    if let file = try archiveContent(path: path, content: raw, reason: "imported-history") { createdFiles.append(file); versionsAdded += 1 }
+                }
+            }
+            var categories = state.categories ?? []
+            for name in restored.categories ?? [] where !categories.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) { categories.append(name) }
+            state.categories = categories
+            // Existing queue/conflicts/publication status are untouched; imported queues are never activated.
+            if recovering {
+                guard let original = corruptStateBytes, try Data(contentsOf: stateFile) == original else { throw fail("Unreadable local storage changed during recovery. Nothing was replaced.") }
+                state.state = "local"; state.message = "Backup recovered locally. Review drafts before choosing Publish."
+                recoveryWriteInProgress = true
+            }
+            defer { recoveryWriteInProgress = false }
+            try persist()
+        } catch {
+            recoveryWriteInProgress = false
+            state = previous
+            for file in createdFiles { try? fm.removeItem(at: file) }
+            pendingHistoryPrunes.removeAll()
+            throw error
+        }
+        if recovering {
+            needsRestore = false; corruptStateBytes = nil
+            do { try automaticBackup(force: true); backupWarning = nil }
+            catch { backupWarning = "Recovery succeeded, but the automatic backup could not be written." }
+        }
+        var result = try bootstrap()
+        var summary: [String: Any] = ["draftsAdded": draftsAdded, "versionsAdded": versionsAdded, "activeQueueRestored": false]
+        if let checkpoint = corruptCheckpoint { summary["corruptStateCheckpoint"] = checkpoint }
+        result["backupResult"] = summary
+        return result
+    }
+
+    private func automaticBackup(force: Bool = false) throws {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
+        let directory = root.appendingPathComponent("backups", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent(formatter.string(from: Date()) + ".nightingale-backup.json")
+        if !force, fm.fileExists(atPath: file.path),
+           let modified = try file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+           Date().timeIntervalSince(modified) < 300 { return }
+        try exportBackup().write(to: file, options: .atomic)
+        try pruneBackups()
+    }
+
+    private func pruneBackups() throws {
+        let directory = root.appendingPathComponent("backups", isDirectory: true)
+        guard fm.fileExists(atPath: directory.path) else { return }
+        let files = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
+        let daily = files.filter { $0.lastPathComponent.range(of: "^[0-9]{4}-[0-9]{2}-[0-9]{2}\\.nightingale-backup\\.json$", options: .regularExpression) != nil }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+        let imports = files.filter { $0.lastPathComponent.hasPrefix("before-import-") && $0.lastPathComponent.hasSuffix(".nightingale-backup.json") }.sorted {
+            ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+        }
+        for old in Array(daily.dropFirst(20)) + Array(imports.dropFirst(20)) { try fm.removeItem(at: old) }
+    }
+
+    private func validationReport(path: String, raw: String) throws -> [String: Any] {
+        guard let validation else { return ["ok": true, "issues": [], "summary": ["documents": 1, "codeBlocks": 0]] }
+        let tree = try git(["ls-tree", "-r", "--name-only", remoteRef], at: repository).text.split(separator: "\n").map(String.init)
+        let files = Array(Set(tree + referencedStagedAssets(raw) + [path])).sorted()
+        var routes = Set(articles.keys.map { articlePath -> String in
+            if articlePath == "index.md" { return "/" }
+            if articlePath == "404.md" { return "/404.html" }
+            return "/" + articlePath.dropFirst("_docs/".count).dropLast(3) + "/"
+        })
+        routes.insert(path == "index.md" ? "/" : path == "404.md" ? "/404.html" : "/" + path.dropFirst("_docs/".count).dropLast(3) + "/")
+        for file in tree where !file.hasPrefix("_") && (file.hasSuffix(".md") || file.hasSuffix(".html")) {
+            guard let source = try? git(["show", "\(remoteRef):\(file)"], at: repository).text, source.hasPrefix("---\n"),
+                  let end = source.dropFirst(4).range(of: "\n---") else { continue }
+            let header = String(source[..<end.lowerBound])
+            let explicit = header.split(separator: "\n").first { $0.hasPrefix("permalink:") }.map { String($0.dropFirst("permalink:".count)).trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }
+            if let explicit, explicit.hasPrefix("/") { routes.insert(explicit) }
+            else if file == "index.md" || file == "index.html" { routes.insert("/") }
+            else if file.hasSuffix("/index.md") || file.hasSuffix("/index.html") { routes.insert("/" + (file as NSString).deletingLastPathComponent + "/") }
+            else { routes.insert("/" + (file as NSString).deletingPathExtension + "/") }
+        }
+        return try validation(["schemaVersion": 1, "documents": [["path": path, "rawContent": raw]], "files": files, "routes": routes.sorted(),
+                               "site": ["url": "https://nightingalelyy.github.io", "baseurl": ""]])
+    }
+
+    private func requireValidPublication(path: String, raw: String) throws {
+        let report = try validationReport(path: path, raw: raw)
+        guard report["ok"] as? Bool == true else { throw fail("Publication validation failed. Review the article's validation results before publishing.") }
+    }
+
+    private func liveURL(_ path: String) -> String {
+        let route = path == "index.md" ? "" : path == "404.md" ? "404.html" : String(path.dropFirst("_docs/".count).dropLast(3)) + "/"
+        return "https://nightingalelyy.github.io/" + (route.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "?#%"))) ?? route)
+    }
+
+    private func publicationJSON(path: String) -> [String: Any]? {
+        let known = state.publications?[path]
+        let sourceHash = articles[path].map { digest($0.rawContent) }
+        let record: WriterPublication
+        if let known, known.sourceSHA256 == sourceHash || known.status == "uploaded" { record = known }
+        else if let sourceHash { record = WriterPublication(sourceSHA256: sourceHash, commit: cachedCommit, status: "unknown", liveURL: liveURL(path), workflowURL: nil, checkedAt: nil, uploadedAt: nil, message: nil) }
+        else { return nil }
+        var result: [String: Any] = ["path": path, "sourceSHA256": record.sourceSHA256, "status": record.status, "liveURL": record.liveURL]
+        if let value = record.commit { result["commit"] = value }
+        if let value = record.workflowURL { result["workflowURL"] = value }
+        if let value = record.checkedAt { result["checkedAt"] = value }
+        if let value = record.uploadedAt { result["uploadedAt"] = value }
+        if let value = record.message { result["message"] = value }
+        return result
+    }
+
+    private func publicationTargets() -> [[String: Any]] {
+        Set(articles.keys).union(state.publications?.keys.map { $0 } ?? []).sorted().compactMap { publicationJSON(path: $0) }
+    }
+
+    func deploymentTargets() throws -> [String: Any] {
+        try initialize()
+        var result: [String: Any] = ["targets": publicationTargets()]
+        if let cachedCommit { result["remoteCommit"] = cachedCommit }
+        return result
+    }
+
+    func applyDeploymentStatus(_ report: [String: Any]) throws -> [String: Any] {
+        try initialize()
+        if needsRestore { return try bootstrap() }
+        guard let results = report["results"] as? [[String: Any]], results.count <= 10000 else { throw fail("Invalid deployment report.") }
+        var publications = state.publications ?? [:]
+        for result in results {
+            guard let path = result["path"] as? String, let target = publicationJSON(path: path), let hash = result["sourceSHA256"] as? String,
+                  hash == target["sourceSHA256"] as? String, let status = result["status"] as? String,
+                  ["uploaded", "building", "live", "failed", "unknown"].contains(status) else { continue }
+            if let commit = result["commit"] as? String, let expected = target["commit"] as? String, commit != expected { continue }
+            let checkedAt = result["checkedAt"] as? String ?? now()
+            if let old = publications[path]?.checkedAt, historyDate(old) > historyDate(checkedAt) { continue }
+            let workflow = result["workflowURL"] as? String
+            if let workflow, !(workflow.hasPrefix("https://github.com/Nightingalelyy/nightingalelyy.github.io/actions/")) { continue }
+            var verifiedURL = liveURL(path)
+            if let supplied = result["liveURL"] as? String {
+                guard let url = URLComponents(string: supplied), url.scheme == "https", url.host?.lowercased() == "nightingalelyy.github.io", url.user == nil, url.password == nil, url.port == nil || url.port == 443 else { continue }
+                verifiedURL = supplied
+            }
+            publications[path] = WriterPublication(sourceSHA256: hash, commit: target["commit"] as? String, status: status, liveURL: verifiedURL,
+                                                   workflowURL: workflow, checkedAt: checkedAt, uploadedAt: target["uploadedAt"] as? String, message: result["message"] as? String)
+        }
+        state.publications = publications
+        try persist(); return try bootstrap()
     }
 
     private func validateRelative(_ path: String) throws {
@@ -294,8 +693,11 @@ final class RepositoryStore {
 
     private func bootstrap() throws -> [String: Any] {
         let paths = Set(articles.keys).union(state.drafts.keys).sorted()
-        return ["articles": try paths.map { try articleJSON(path: $0) }, "categories": state.categories ?? [], "status": statusJSON(),
-                "repositoryPath": repository.path, "remoteURL": remoteURL, "branch": "main"]
+        var result: [String: Any] = ["articles": try paths.map { try articleJSON(path: $0) }, "categories": state.categories ?? [], "status": statusJSON(),
+                "repositoryPath": repository.path, "remoteURL": remoteURL, "branch": "main", "publications": publicationTargets(),
+                "recovery": ["needsRestore": needsRestore, "message": needsRestore ? state.message : "", "automaticBackupDirectory": root.appendingPathComponent("backups").path, "historyLimitPerArticle": 100]]
+        if let warning = backupWarning { result["backupWarning"] = warning }
+        return result
     }
 
     private func articleJSON(path: String) throws -> [String: Any] {
@@ -303,6 +705,10 @@ final class RepositoryStore {
         guard let raw = state.drafts[path]?.rawContent ?? articles[path]?.rawContent else { throw fail("This article could not be found.") }
         var result: [String: Any] = ["path": path, "rawContent": raw, "revision": digest(raw),
                                     "isDraft": state.drafts[path] != nil, "isQueued": state.queue[path] != nil]
+        if let publication = publicationJSON(path: path) {
+            var record = publication; record["matchesCurrentRevision"] = record["sourceSHA256"] as? String == digest(raw)
+            result["publication"] = record
+        }
         if let queue = state.queue[path] { result["queuedRevision"] = digest(queue.rawContent) }
         if let conflict = state.conflicts[path] { result["conflict"] = ["base": conflict.base, "local": conflict.local, "remote": conflict.remote] }
         return result
@@ -312,6 +718,7 @@ final class RepositoryStore {
         try validateArticlePath(path); try validateArticleContent(raw)
         guard let current = state.drafts[path]?.rawContent ?? articles[path]?.rawContent else { throw fail("Create the article before saving changes.") }
         guard digest(current) == expected else { throw fail("This article changed since it was opened. Reload it before saving, so neither version is overwritten.") }
+        if raw != current { try archiveContent(path: path, content: current, reason: "autosave", coalesce: true) }
         if raw == articles[path]?.rawContent, state.queue[path] == nil, state.conflicts[path] == nil {
             state.drafts.removeValue(forKey: path)
         } else {
@@ -358,6 +765,7 @@ final class RepositoryStore {
                 try persist(); continue
             }
             do {
+                try requireValidPublication(path: path, raw: snapshot.rawContent)
                 try publish(path: path, snapshot: snapshot)
                 finishPublication(path: path, snapshot: snapshot)
                 published += 1; try persist()
@@ -377,7 +785,7 @@ final class RepositoryStore {
         if !state.conflicts.isEmpty {
             state.state = "conflict"; state.message = "Conflicting edits need review. Both versions are saved."
         } else if state.queue.isEmpty {
-            state.state = "synced"; state.message = published > 0 ? "Published to GitHub. The website will update after its build finishes." : "Everything is up to date."
+            state.state = "synced"; state.message = published > 0 ? "Uploaded to GitHub. Website deployment is awaiting verification." : "Everything is up to date."
         }
         try persist(); return try bootstrap()
     }
@@ -420,7 +828,12 @@ final class RepositoryStore {
         }
         _ = try git(["add", "--"] + changed, at: directory)
         _ = try git(["-c", "commit.gpgsign=false", "commit", "-m", "Publish \((path as NSString).lastPathComponent) via Nightingale Writer"], at: directory)
+        let uploadedCommit = try git(["rev-parse", "HEAD"], at: directory).text.trimmingCharacters(in: .whitespacesAndNewlines)
         _ = try git(["push", "origin", "HEAD:refs/heads/main"], at: directory, network: true)
+        var publications = state.publications ?? [:]
+        publications[path] = WriterPublication(sourceSHA256: digest(snapshot.rawContent), commit: uploadedCommit, status: "uploaded", liveURL: liveURL(path), workflowURL: nil, checkedAt: nil, uploadedAt: now(), message: "Uploaded to GitHub; website deployment is not yet verified.")
+        state.publications = publications
+        try persist()
         // Record the successfully pushed commit without requiring another network request.
         _ = try git(["fetch", "--no-tags", directory.path, "+HEAD:\(remoteRef)"], at: repository)
         try reloadArticles()
@@ -486,6 +899,8 @@ final class RepositoryStore {
         try fm.createDirectory(at: assetsRoot, withIntermediateDirectories: true)
         let file = try safeDestination(path, inside: assetsRoot)
         try data.write(to: file, options: .atomic)
+        do { try automaticBackup(); backupWarning = nil }
+        catch { backupWarning = "The image is saved locally, but the automatic backup could not be written." }
         return ["path": "/" + path, "mime": mime, "base64": data.base64EncodedString()]
     }
 

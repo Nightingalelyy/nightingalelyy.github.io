@@ -8,6 +8,7 @@ import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { api } from './api.js';
 import { parseArticle, editorFields, serializeArticle, normalizeDateForInput } from './content.js';
 import { renderMarkdownPreview, codeHighlightKey, planCodeHighlights, applyCodeHighlightResults } from './markdown.js';
+import { publicationView, mergePublicationRecords, validationSummary, issueLocation, compareHistoryVersions, safeExternalURL, workspaceRecovery } from './workflow.js';
 
 const $ = (selector) => document.querySelector(selector);
 const icons = {
@@ -39,8 +40,11 @@ document.querySelectorAll('[data-icon]').forEach((node) => { node.innerHTML = ic
 const editable = new Compartment();
 const state = {
   articles: [], categories: [], active: null, parsed: null, initialFields: {}, savedRaw: '', filter: 'all', query: '', view: 'write', previewDevice: 'desktop',
-  status: {}, busy: false, publishing: false, transitioning: false, editVersion: 0, selectionVersion: 0, ready: false,
+  status: {}, publications: [], busy: false, publishing: false, transitioning: false, editVersion: 0, selectionVersion: 0, ready: false, recoveryMode: false, recoveryMessage: '',
 };
+const recovery = { history: null, historyGeneration: 0, validation: null, backup: null, busy: false };
+let publicationPollInFlight = false;
+let publicationPollAt = 0;
 let editor;
 let autosaveTimer;
 let previewTimer;
@@ -101,24 +105,64 @@ function showError(error) {
   return message;
 }
 function updateArticle(item) {
-  const next = enrich(item);
   const index = state.articles.findIndex((entry) => entry.path === item.path);
+  const previous = index >= 0 ? state.articles[index] : null;
+  const publication = item.publication || previous?.publication;
+  const next = enrich({ ...item, ...(publication ? { publication: { ...publication, matchesCurrentRevision: publication.sourceSHA256 === item.revision } } : {}) });
   if (index === -1) state.articles.unshift(next); else state.articles[index] = next;
   return next;
 }
 function applySnapshot(snapshot, { updateDocument = true } = {}) {
+  if (snapshot?.recovery) {
+    const access = workspaceRecovery(snapshot);
+    state.recoveryMode = access.needsRestore;
+    state.recoveryMessage = access.message;
+    if (state.recoveryMode) {
+      clearTimeout(autosaveTimer);
+      if (['drafts', 'queued'].includes(state.filter)) state.filter = 'all';
+    }
+  }
   if (Array.isArray(snapshot?.articles)) state.articles = snapshot.articles.map(enrich);
   if (Array.isArray(snapshot?.categories)) state.categories = snapshot.categories;
+  if (Array.isArray(snapshot?.publications)) state.publications = snapshot.publications;
   if (snapshot?.status) state.status = snapshot.status;
   if (updateDocument && state.active) {
     const updated = state.articles.find((article) => article.path === state.active.path);
     if (updated && !isDirty() && updated.rawContent !== state.savedRaw) {
       loadDocument(updated);
     } else if (updated) {
-      state.active = { ...state.active, isDraft: updated.isDraft, isQueued: updated.isQueued, conflict: updated.conflict };
+      state.active = { ...state.active, isDraft: updated.isDraft, isQueued: updated.isQueued, conflict: updated.conflict, publication: updated.publication };
     }
   }
+  applyWorkspaceAccess(); renderLibrary(); renderStatus(); renderDocumentStatus();
+}
+function applyWorkspaceAccess() {
+  const readOnly = state.recoveryMode || state.transitioning;
+  $('#recovery-banner').hidden = !state.recoveryMode;
+  $('#recovery-message').textContent = state.recoveryMessage;
+  $('#new-button').disabled = readOnly || state.busy || state.publishing || !state.ready;
+  document.querySelectorAll('[data-filter="drafts"], [data-filter="queued"]').forEach((button) => { button.disabled = state.recoveryMode; });
+  document.querySelectorAll('#document input').forEach((input) => { input.disabled = readOnly; });
+  editor?.dispatch({ effects: editable.reconfigure([EditorView.editable.of(!readOnly), EditorState.readOnly.of(readOnly)]) });
+}
+function applyPublicationSnapshot(snapshot) {
+  const patches = new Map();
+  for (const publication of snapshot?.publications || []) if (publication?.path) patches.set(publication.path, publication);
+  for (const article of snapshot?.articles || []) if (article.publication) patches.set(article.path, article.publication);
+  if (Array.isArray(snapshot?.publications)) state.publications = snapshot.publications;
+  state.articles = mergePublicationRecords(state.articles, [...patches.values()]);
+  if (state.active) state.active = mergePublicationRecords([state.active], [...patches.values()])[0];
   renderLibrary(); renderStatus(); renderDocumentStatus();
+}
+async function pollPublications({ force = false } = {}) {
+  if (!state.ready || state.recoveryMode || state.busy || state.transitioning || publicationPollInFlight || document.querySelector('dialog[open]')) return;
+  const pending = state.articles.some((article) => publicationView(article).pending);
+  if (!force && Date.now() - publicationPollAt < (pending ? 30000 : 120000)) return;
+  publicationPollInFlight = true;
+  publicationPollAt = Date.now();
+  try { applyPublicationSnapshot(await api.pollPublicationStatus()); }
+  catch { /* Keep the last verified state; a network error does not mean a build failed. */ }
+  finally { publicationPollInFlight = false; }
 }
 function allCategories() {
   return [...new Set([...state.categories, ...state.articles.filter((item) => item.path.startsWith('_docs/')).map((item) => item.meta.category)])].sort((a, b) => a.localeCompare(b));
@@ -129,8 +173,8 @@ function renderLibrary() {
   const queued = state.articles.filter((item) => item.isQueued);
   const pages = state.articles.filter((item) => !item.path.startsWith('_docs/'));
   $('#all-count').textContent = articles.length;
-  $('#draft-count').textContent = drafts.length;
-  $('#queue-count').textContent = queued.length;
+  $('#draft-count').textContent = state.recoveryMode ? '—' : drafts.length;
+  $('#queue-count').textContent = state.recoveryMode ? '—' : queued.length;
   $('#page-count').textContent = pages.length;
   const categories = allCategories();
   $('#category-nav').innerHTML = categories.map((category) => `<button class="nav-item${state.filter === `category:${category}` ? ' active' : ''}" data-category="${escapeHTML(category)}"><span class="category-dot"></span><span>${escapeHTML(category)}</span><span class="count">${articles.filter((item) => item.meta.category === category).length}</span></button>`).join('');
@@ -155,12 +199,16 @@ function renderLibrary() {
   $('#article-list').innerHTML = visible.map((item) => {
     const excerpt = item.meta.body.replace(/```[\s\S]*?```/g, '').replace(/<[^>]*>|[\n#*`_>]/g, ' ').replace(/\s+/g, ' ').trim();
     const dateLabel = item.meta.date ? item.meta.date.slice(0, 7).replace('-', '.') : '';
-    const badges = [item.conflict ? '<span class="badge conflict">Needs review</span>' : '', item.isQueued ? '<span class="badge queued">Queued</span>' : '', item.isDraft ? '<span class="badge draft">Local draft</span>' : ''].filter(Boolean).join('');
+    const publication = publicationView(item);
+    const publicationLabel = ({ uploaded: 'Uploaded', building: 'Building', live: 'Live', failed: 'Failed' })[publication.status];
+    const publicationBadge = publicationLabel && publication.matchesCurrent ? `<span class="badge publication-${publication.status}">${publicationLabel}</span>` : '';
+    const badges = [item.conflict ? '<span class="badge conflict">Needs review</span>' : '', item.isQueued ? '<span class="badge queued">Queued</span>' : '', item.isDraft ? '<span class="badge draft">Local draft</span>' : '', publicationBadge].filter(Boolean).join('');
     return `<button class="article-row${state.active?.path === item.path ? ' selected' : ''}" data-path="${escapeHTML(item.path)}" aria-label="${escapeHTML(item.meta.title)}${item.isDraft ? ', local draft' : ''}"${state.active?.path === item.path ? ' aria-current="true"' : ''}><div class="article-row-top"><span class="article-category">${escapeHTML(item.meta.category)}</span><span class="article-date">${escapeHTML(dateLabel)}</span></div><div class="article-title">${escapeHTML(item.meta.title)}</div><div class="article-excerpt">${escapeHTML(excerpt || 'A new beginning…')}</div>${badges ? `<div class="article-badges">${badges}</div>` : ''}</button>`;
   }).join('') || `<div class="list-empty"><strong>${state.query ? 'No matching articles' : state.filter === 'queued' ? 'Nothing waiting to publish' : state.filter === 'drafts' ? 'A clean writing desk' : 'No entries yet'}</strong>${state.query ? 'Try a different word or category.' : state.filter === 'drafts' ? 'Edits you save locally will appear here.' : state.filter === 'queued' ? 'Choose Publish on an article when it is ready.' : 'Create an article to start writing.'}</div>`;
   if (!visible.length && !state.query && state.filter.startsWith('category:')) {
     $('#article-list').innerHTML = '<div class="list-empty"><strong>No articles yet</strong>Create your first article in this category.<button type="button" class="button primary" data-new-article>New article</button></div>';
   }
+  if (state.recoveryMode && !visible.length && !state.query) $('#article-list').innerHTML = '<div class="list-empty"><strong>No cached articles here</strong>Open Backups to restore your local workspace.</div>';
 }
 function renderStatus() {
   const status = state.status;
@@ -169,7 +217,8 @@ function renderStatus() {
   const stateName = String(status.state || '').toLowerCase();
   let color = '';
   let text = status.message || 'Your library is available offline';
-  if (state.busy) { text = 'Syncing with GitHub… Your local drafts are safe.'; color = 'blue'; }
+  if (state.recoveryMode) { text = 'Recovery mode · restore a backup to resume editing'; color = 'amber'; }
+  else if (state.busy) { text = 'Syncing with GitHub… Your local drafts are safe.'; color = 'blue'; }
   else if (conflicts) { text = `${conflicts} ${conflicts === 1 ? 'article needs' : 'articles need'} review before publishing`; color = 'amber'; }
   else if (stateName.includes('auth')) { text = status.message || 'GitHub sign-in needs attention. Your drafts are saved locally.'; color = 'amber'; }
   else if (stateName.includes('offline') || stateName.includes('error')) { color = 'amber'; }
@@ -179,40 +228,54 @@ function renderStatus() {
   $('#connection-dot').className = `status-dot ${color}`;
   const stamp = status.lastSyncedAt ? new Date(status.lastSyncedAt) : null;
   $('#last-sync').textContent = stamp && !Number.isNaN(stamp.getTime()) ? `Last synced ${stamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
-  $('#sync-button').disabled = state.busy || !state.ready;
-  $('#add-category-button').disabled = state.busy || state.transitioning || !state.ready;
+  $('#sync-button').disabled = state.recoveryMode || state.busy || !state.ready;
+  $('#add-category-button').disabled = state.recoveryMode || state.busy || state.transitioning || !state.ready;
+  $('#global-history-button').disabled = state.busy || state.transitioning || !state.ready;
+  $('#backups-button').disabled = state.busy || state.transitioning || !state.ready;
 }
 function renderDocumentStatus() {
   if (!state.active) return;
   const dirty = isDirty();
+  const publication = publicationView(state.active, { dirty });
   $('#document-category').textContent = state.active.path.startsWith('_docs/') ? ($('#category-input').value || 'Article') : 'Page';
-  $('#document-state').textContent = state.active.conflict ? 'Needs review' : dirty ? 'Editing' : state.active.isQueued ? 'Queued' : state.active.isDraft ? 'Local draft' : 'Published';
-  $('#save-label').textContent = dirty ? 'Save' : 'Saved';
-  $('#save-button').disabled = !dirty || state.transitioning;
-  $('#publish-button').disabled = state.busy || state.publishing || state.transitioning || Boolean(state.active.conflict) || (!dirty && !state.active.isDraft);
-  $('#image-button').disabled = state.transitioning;
+  $('#document-state').textContent = state.recoveryMode ? 'Read-only' : state.active.conflict ? 'Needs review' : publication.label;
+  $('#save-label').textContent = state.recoveryMode ? 'Read-only' : dirty ? 'Save' : 'Saved';
+  $('#save-button').disabled = state.recoveryMode || !dirty || state.transitioning;
+  $('#publish-button').disabled = state.recoveryMode || state.busy || state.publishing || state.transitioning || Boolean(state.active.conflict) || (!dirty && !state.active.isDraft);
+  $('#image-button').disabled = state.recoveryMode || state.transitioning;
+  $('#history-button').disabled = state.busy || state.transitioning || state.publishing;
   $('#discard-button').hidden = !state.active.isDraft && !dirty;
-  $('#discard-button').disabled = state.active.isQueued || state.busy;
+  $('#discard-button').disabled = state.recoveryMode || state.active.isQueued || state.busy;
   $('#discard-button').title = state.active.isQueued ? 'Cancel the queued publish before discarding' : 'Discard local changes';
   $('#cancel-queue-button').hidden = !state.active.isQueued;
-  $('#cancel-queue-button').disabled = state.busy;
+  $('#cancel-queue-button').disabled = state.recoveryMode || state.busy;
   $('#queued-banner').hidden = !state.active.isQueued || Boolean(state.active.conflict);
   $('#conflict-banner').hidden = !state.active.conflict;
+  $('#publication-banner').hidden = state.recoveryMode || !state.active.publication;
+  $('#publication-banner').className = `notice publication-notice publication-${publication.tone}`;
+  $('#publication-message').textContent = publication.message;
+  $('#publication-message').title = state.active.publication?.checkedAt ? `Last checked ${savedDate(state.active.publication.checkedAt)}` : '';
+  $('#publication-icon').innerHTML = icon(publication.status === 'failed' ? 'alert' : publication.status === 'live' ? 'check' : 'globe');
+  for (const [selector, value] of [['#publication-build-link', state.active.publication?.workflowURL], ['#publication-live-link', state.active.publication?.liveURL]]) {
+    const url = safeExternalURL(value);
+    $(selector).hidden = !url;
+    if (url) $(selector).href = url; else $(selector).removeAttribute('href');
+  }
   $('#document-path').textContent = state.active.path;
   $('#document-path').title = state.active.path;
   const body = editor?.state.doc.toString() || '';
   const words = body.trim() ? body.trim().split(/\s+/).length : 0;
   $('#word-count').textContent = `${words.toLocaleString()} ${words === 1 ? 'word' : 'words'}`;
-  if (dirty) $('#save-status').textContent = 'Saving locally…';
+  if (state.recoveryMode) $('#save-status').textContent = 'Viewing cached articles · read-only';
+  else if (dirty) $('#save-status').textContent = 'Saving locally…';
   else $('#save-status').textContent = state.active.isDraft ? 'Saved on this Mac' : 'Up to date';
 }
 function setTransition(value) {
   state.transitioning = value;
-  $('#add-category-button').disabled = value || state.busy || !state.ready;
+  $('#add-category-button').disabled = state.recoveryMode || value || state.busy || !state.ready;
   $('#editor-panel').classList.toggle('is-transitioning', value);
-  document.querySelectorAll('#document input').forEach((input) => { input.disabled = value; });
-  editor?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(!value)) });
-  renderDocumentStatus();
+  applyWorkspaceAccess();
+  renderStatus(); renderDocumentStatus();
 }
 function loadDocument(item) {
   clearTimeout(autosaveTimer); clearTimeout(previewTimer);
@@ -242,7 +305,7 @@ function loadDocument(item) {
         EditorView.lineWrapping,
         EditorView.contentAttributes.of({ 'aria-label': 'Article Markdown', spellcheck: 'true', autocapitalize: 'off' }),
         placeholder('Let the first sentence lead the way…'),
-        editable.of(EditorView.editable.of(!state.transitioning)),
+        editable.of([EditorView.editable.of(!state.transitioning && !state.recoveryMode), EditorState.readOnly.of(state.transitioning || state.recoveryMode)]),
         keymap.of([{ key: 'Mod-s', run: () => { saveCurrent().catch(showError); return true; } }, indentWithTab, ...defaultKeymap, ...historyKeymap]),
         EditorView.updateListener.of((update) => { if (update.docChanged) onEdit(); }),
       ],
@@ -252,7 +315,7 @@ function loadDocument(item) {
   $('#document').hidden = false;
   try { localStorage.setItem('nightingale.selectedPath', item.path); } catch { /* Preference storage is optional. */ }
   setView(state.view);
-  renderLibrary(); renderDocumentStatus(); renderPreview();
+  applyWorkspaceAccess(); renderLibrary(); renderDocumentStatus(); renderPreview();
 }
 async function selectArticle(path) {
   if (path === state.active?.path || state.transitioning || state.busy || state.publishing) return;
@@ -268,6 +331,7 @@ async function selectArticle(path) {
   finally { if (generation === state.selectionVersion) setTransition(false); }
 }
 function onEdit() {
+  if (state.recoveryMode) return;
   state.editVersion++;
   clearTimeout(autosaveTimer); clearTimeout(previewTimer);
   renderDocumentStatus();
@@ -276,9 +340,10 @@ function onEdit() {
 }
 async function saveCurrent() {
   clearTimeout(autosaveTimer);
+  if (state.recoveryMode) return;
   const requestedPath = state.active?.path;
   const next = saveChain.catch(() => {}).then(async () => {
-    if (!state.active || state.active.path !== requestedPath) return;
+    if (state.recoveryMode || !state.active || state.active.path !== requestedPath) return;
     const rawContent = currentRaw();
     if (rawContent === state.savedRaw) return;
     if (!$('#title-input').value.trim()) throw new Error('Add a title before saving. Your text is still here.');
@@ -540,7 +605,7 @@ async function renderPreview() {
   if (version === previewVersion && Math.abs(scroller.scrollTop - restoredTop) < 2) scroller.scrollTop = scrollTop;
 }
 async function runSync({ publish = false, quiet = false } = {}) {
-  if (state.busy || state.transitioning || !state.ready || document.querySelector('dialog[open]')) return;
+  if (state.recoveryMode || state.busy || state.transitioning || !state.ready || document.querySelector('dialog[open]')) return;
   state.busy = true; setTransition(true); renderStatus(); renderDocumentStatus();
   try {
     await saveCurrent();
@@ -551,25 +616,280 @@ async function runSync({ publish = false, quiet = false } = {}) {
       const count = snapshot.status?.queuedCount || 0;
       if (count) showToast(snapshot.status?.message || 'Publication is queued. Your saved version will retry when connected.');
       else if (String(snapshot.status?.state || '').match(/error|offline|auth/i)) showToast(snapshot.status?.message || 'Could not connect. Your local drafts are safe.', true);
-      else showToast(publish ? 'Published to GitHub. Your site will update after its build finishes.' : 'Your library is up to date.');
+      else showToast(publish ? 'Uploaded to GitHub. Checking website publication.' : 'Your library is up to date.');
     }
   } catch (error) { if (!quiet) showError(error); }
-  finally { state.busy = false; setTransition(false); renderStatus(); renderDocumentStatus(); }
+  finally { state.busy = false; setTransition(false); renderStatus(); renderDocumentStatus(); void pollPublications({ force: true }); }
 }
 async function publishCurrent() {
-  if (!state.active || state.busy || state.publishing || state.active.conflict || document.querySelector('dialog[open]')) return;
+  if (state.recoveryMode || !state.active || state.busy || state.publishing || state.active.conflict || document.querySelector('dialog[open]')) return;
   const path = state.active.path;
   state.publishing = true;
-  renderDocumentStatus();
+  setTransition(true);
   try {
     await saveCurrent();
-    applySnapshot(await api.queue(path));
+    const revision = state.active.revision;
+    const report = await api.validatePublication(path, revision);
+    const summary = validationSummary(report);
+    if (!summary.canPublish || summary.issues.length) {
+      recovery.validation = { path, revision: report.revision || revision, rawContent: currentRaw(), report };
+      showPublicationIssues(summary);
+      return;
+    }
+    setTransition(false);
+    applySnapshot(await api.queue(path, report.revision || revision));
+    await runSync({ publish: true });
+  } catch (error) { showError(error); }
+  finally { state.publishing = false; setTransition(false); renderDocumentStatus(); }
+}
+function showPublicationIssues(summary) {
+  $('#validation-title').textContent = summary.canPublish ? 'Review before publishing' : 'A few things to fix';
+  $('#validation-summary').textContent = summary.errors.length ? `${summary.errors.length} ${summary.errors.length === 1 ? 'issue needs' : 'issues need'} attention before this article can publish.` : summary.warnings.length ? `${summary.warnings.length} ${summary.warnings.length === 1 ? 'warning' : 'warnings'} to review. Your draft is saved locally.` : 'Publication checks could not be completed. Your draft is saved locally.';
+  $('#validation-issues').innerHTML = summary.issues.map((issue, index) => {
+    const line = Number.isInteger(Number(issue.line)) && Number(issue.line) > 0 ? Number(issue.line) : null;
+    const location = line ? `Line ${line}` : issue.path || recovery.validation.path;
+    return `<li class="validation-issue ${issue.severity === 'error' ? 'issue-error' : 'issue-warning'}"><span class="issue-severity">${issue.severity === 'error' ? 'Fix' : 'Review'}</span><div><p>${escapeHTML(issue.message)}</p><span class="issue-path">${escapeHTML(issue.path || recovery.validation.path)}</span></div>${line ? `<button class="button small" data-validation-issue="${index}">${escapeHTML(location)}<span aria-hidden="true"> ↗</span></button>` : ''}</li>`;
+  }).join('');
+  $('#validation-publish-button').hidden = !summary.canPublish;
+  $('#validation-publish-button').disabled = false;
+  $('#validation-dialog').showModal();
+}
+async function publishAfterWarnings() {
+  const context = recovery.validation;
+  if (state.recoveryMode || !context || !validationSummary(context.report).canPublish || state.publishing) return;
+  if (state.active?.path !== context.path || state.active.revision !== context.revision || isDirty()) {
+    $('#validation-dialog').close();
+    showToast('Your draft changed. Check the latest version before publishing.');
+    return;
+  }
+  $('#validation-publish-button').disabled = true;
+  state.publishing = true;
+  try {
+    $('#validation-dialog').close();
+    applySnapshot(await api.queue(context.path, context.revision));
     await runSync({ publish: true });
   } catch (error) { showError(error); }
   finally { state.publishing = false; renderDocumentStatus(); }
 }
-function newCategory() {
+async function goToPublicationIssue(index) {
+  const context = recovery.validation;
+  const issue = context?.report.issues?.[index];
+  if (!context || !issue) return;
+  const path = issue.path && state.articles.some((article) => article.path === issue.path) ? issue.path : context.path;
+  $('#validation-dialog').close();
+  if (state.active?.path !== path) await selectArticle(path);
+  if (state.active?.path !== path) return;
+  const location = issueLocation(issue, path === context.path ? context.rawContent : currentRaw());
+  setView('write');
+  if (location.kind === 'field') {
+    if (['author', 'order'].includes(location.field)) { $('#extra-metadata').hidden = false; $('#details-button').setAttribute('aria-expanded', 'true'); }
+    const field = $(`#${location.field}-input`);
+    field?.focus();
+    if (field?.type !== 'date' && field?.type !== 'number') field?.select();
+  } else if (location.kind === 'body') {
+    const line = editor.state.doc.line(Math.min(location.bodyLine, editor.state.doc.lines));
+    editor.dispatch({ selection: { anchor: line.from }, effects: EditorView.scrollIntoView(line.from, { y: 'center' }) });
+    editor.focus();
+  } else {
+    $('#extra-metadata').hidden = false;
+    $('#details-button').setAttribute('aria-expanded', 'true');
+    $('#title-input').focus();
+  }
+}
+function savedDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Date unavailable' : date.toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function historyReason(reason) {
+  const labels = { save: 'Saved draft', 'before-save': 'Before editing', discard: 'Before discarding', discarded: 'Discarded draft', 'before-discard': 'Before discarding', restore: 'Before restoring', 'before-restore': 'Before restoring', 'backup-import': 'Imported backup', 'import-conflict': 'Imported backup', 'imported-queue': 'Recovered queued version' };
+  return labels[reason] || String(reason || 'Saved version').replace(/[-_]+/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
+}
+async function openHistory(path) {
   if (!state.ready || state.busy || state.publishing || state.transitioning || document.querySelector('dialog[open]')) return;
+  setTransition(true);
+  try {
+    await saveCurrent();
+    $('#history-error').hidden = true;
+    $('#history-dialog').showModal();
+    await loadHistoryList(path);
+  } catch (error) { showError(error); }
+  finally { setTransition(false); }
+}
+async function loadHistoryList(path) {
+  const context = { path, entries: [], selected: null, current: null, loading: true };
+  recovery.history = context;
+  recovery.historyGeneration++;
+  $('#history-title').textContent = path ? 'Article history' : 'History & recovery';
+  $('#history-description').textContent = path ? 'Compare a saved version with your current work.' : 'Browse saved versions, including drafts you previously discarded.';
+  $('#history-all-button').hidden = !path;
+  $('#history-list').innerHTML = '<p class="history-list-message">Loading saved versions…</p>';
+  $('#history-comparison-content').hidden = true;
+  $('#history-empty').hidden = false;
+  $('#history-empty').textContent = 'Choose a saved version to compare.';
+  $('#history-restore-button').disabled = true;
+  $('#history-queued-notice').hidden = true;
+  $('#history-restore-note').textContent = state.recoveryMode ? 'Restore a workspace backup to enable editing. Saved versions remain available to view.' : 'Restoring saves a local draft. It does not publish.';
+  try {
+    const result = await api.listHistory(path);
+    if (recovery.history !== context || !$('#history-dialog').open) return;
+    context.entries = [...(result.entries || [])].sort((a, b) => String(b.savedAt || '').localeCompare(String(a.savedAt || '')));
+    context.loading = false;
+    renderHistoryList();
+    if (context.entries.length) await selectHistoryVersion(0);
+    else { $('#history-empty').textContent = 'Saved versions will appear here as you edit or restore your writing.'; }
+  } catch (error) {
+    if (recovery.history === context) { $('#history-error').textContent = error.message || String(error); $('#history-error').hidden = false; $('#history-list').innerHTML = ''; }
+  }
+}
+function renderHistoryList() {
+  const context = recovery.history;
+  if (!context) return;
+  const scrollTop = $('#history-list').scrollTop;
+  $('#history-list').innerHTML = context.entries.map((entry, index) => `<button class="history-entry${context.selected?.id === entry.id ? ' selected' : ''}" data-history-index="${index}"${context.selected?.id === entry.id ? ' aria-current="true"' : ''}><strong>${escapeHTML(savedDate(entry.savedAt))}</strong><span>${escapeHTML(historyReason(entry.reason))}</span>${context.path ? '' : `<small>${escapeHTML(entry.path)}</small>`}</button>`).join('') || '<p class="history-list-message">No saved versions yet.</p>';
+  $('#history-list').scrollTop = scrollTop;
+}
+function historySource(rows) {
+  return rows.map((row) => `<span class="diff-line diff-${row.kind}"><span class="diff-number" aria-hidden="true">${row.number}</span><span>${escapeHTML(row.text) || ' '}</span></span>`).join('');
+}
+async function selectHistoryVersion(index) {
+  const context = recovery.history;
+  const entry = context?.entries[index];
+  if (!entry || recovery.busy) return;
+  const generation = ++recovery.historyGeneration;
+  context.selected = entry;
+  context.loading = true;
+  renderHistoryList();
+  $('#history-error').hidden = true;
+  $('#history-restore-button').disabled = true;
+  $('#history-comparison-content').hidden = true;
+  $('#history-empty').hidden = false;
+  $('#history-empty').textContent = 'Loading this version…';
+  try {
+    const known = state.articles.find((article) => article.path === entry.path);
+    const [selected, current] = await Promise.all([api.readHistory(entry.id, entry.path), known ? api.read(entry.path) : Promise.resolve(null)]);
+    if (generation !== recovery.historyGeneration || recovery.history !== context || !$('#history-dialog').open) return;
+    context.selected = selected; context.current = current; context.loading = false;
+    const comparison = compareHistoryVersions(current?.rawContent ?? null, selected.rawContent);
+    $('#history-path').textContent = entry.path;
+    $('#history-path').title = entry.path;
+    $('#history-diff-summary').textContent = comparison.exact ? `${comparison.added} lines added · ${comparison.removed} lines removed` : 'Large versions shown side by side';
+    $('#history-current-title').textContent = current ? 'Current on this Mac' : 'Article no longer in your library';
+    $('#history-selected-title').textContent = `Saved ${savedDate(selected.savedAt)}`;
+    $('#history-current-source').innerHTML = comparison.left.length ? historySource(comparison.left) : '<span class="history-no-current">Restore this version to recover the article as a local draft.</span>';
+    $('#history-selected-source').innerHTML = historySource(comparison.right);
+    $('#history-empty').hidden = true;
+    $('#history-comparison-content').hidden = false;
+    $('#history-queued-notice').hidden = !current?.isQueued;
+    $('#history-restore-button').disabled = state.recoveryMode || Boolean(current?.isQueued) || current?.rawContent === selected.rawContent;
+    $('#history-restore-note').textContent = state.recoveryMode ? 'Restore a workspace backup to enable editing. Saved versions remain available to view.' : current?.rawContent === selected.rawContent ? 'This version is already current.' : 'Restoring saves a local draft. It does not publish.';
+  } catch (error) {
+    if (generation === recovery.historyGeneration) { context.loading = false; $('#history-error').textContent = error.message || String(error); $('#history-error').hidden = false; $('#history-empty').textContent = 'This version could not be opened.'; }
+  }
+}
+async function restoreSelectedHistory() {
+  const context = recovery.history;
+  if (state.recoveryMode || typeof context?.selected?.rawContent !== 'string' || context.loading || context.current?.isQueued || recovery.busy) return;
+  recovery.busy = true;
+  $('#history-restore-button').disabled = true;
+  setTransition(true);
+  try {
+    const path = context.selected.path;
+    const snapshot = await api.restoreHistory(context.selected.id, path, context.current?.revision);
+    applySnapshot(snapshot, { updateDocument: false });
+    const restored = state.articles.find((article) => article.path === path);
+    if (!restored) throw new Error('The restored draft could not be loaded. Reopen your library to view it.');
+    state.filter = 'drafts'; state.query = ''; $('#search').value = '';
+    loadDocument(restored);
+    $('#history-dialog').close();
+    showToast('Saved version restored as a local draft.');
+  } catch (error) { $('#history-error').textContent = error.message || String(error); $('#history-error').hidden = false; }
+  finally { recovery.busy = false; setTransition(false); if ($('#history-dialog').open) $('#history-restore-button').disabled = false; }
+}
+async function cancelHistoryQueue() {
+  const context = recovery.history;
+  if (state.recoveryMode || !context?.selected || recovery.busy) return;
+  recovery.busy = true; $('#history-cancel-queue').disabled = true;
+  try {
+    applySnapshot(await api.cancel(context.selected.path));
+    recovery.busy = false;
+    const index = context.entries.findIndex((entry) => entry.id === context.selected.id);
+    await selectHistoryVersion(index);
+  } catch (error) { $('#history-error').textContent = error.message || String(error); $('#history-error').hidden = false; }
+  finally { recovery.busy = false; $('#history-cancel-queue').disabled = false; }
+}
+async function openBackups() {
+  if (!state.ready || state.busy || state.publishing || state.transitioning || document.querySelector('dialog[open]')) return;
+  setTransition(true);
+  try {
+    await saveCurrent();
+    recovery.backup = null;
+    $('#backup-error').hidden = true;
+    $('#backup-preview').hidden = true;
+    $('#restore-backup-button').hidden = true;
+    $('#backup-title').textContent = state.recoveryMode ? 'Restore your local workspace' : 'Back up your writing';
+    $('#backup-description').textContent = state.recoveryMode ? 'Choose a backup to recover your drafts and resume editing. The unreadable workspace file will be kept for recovery.' : 'Keep a copy of your local drafts, images, categories, and saved history.';
+    setBackupBusy(false);
+    $('#backup-dialog').showModal();
+  } catch (error) { showError(error); }
+  finally { setTransition(false); }
+}
+function setBackupBusy(busy) {
+  recovery.busy = busy;
+  ['#export-backup-button', '#choose-backup-button', '#restore-backup-button'].forEach((selector) => { $(selector).disabled = busy; });
+  $('#export-backup-button').disabled = busy || state.recoveryMode;
+}
+async function exportBackup() {
+  if (state.recoveryMode || recovery.busy) return;
+  setBackupBusy(true); $('#backup-error').hidden = true;
+  try {
+    await saveCurrent();
+    const result = await api.exportBackup();
+    if (!result.cancelled) {
+      $('#backup-error').className = 'inline-success';
+      $('#backup-error').textContent = `Backup saved${result.fileName || result.filename ? ` as ${result.fileName || result.filename}` : ''}.`;
+      $('#backup-error').hidden = false;
+    }
+  } catch (error) { $('#backup-error').className = 'inline-error'; $('#backup-error').textContent = error.message || String(error); $('#backup-error').hidden = false; }
+  finally { setBackupBusy(false); }
+}
+async function chooseBackup() {
+  if (recovery.busy) return;
+  setBackupBusy(true); $('#backup-error').hidden = true;
+  try {
+    if (recovery.backup) await api.cancelBackupImport();
+    recovery.backup = null;
+    $('#backup-preview').hidden = true; $('#restore-backup-button').hidden = true;
+    const result = await api.chooseBackup();
+    if (result.cancelled) return;
+    if (!result.token || !result.summary) throw new Error('This backup could not be inspected.');
+    recovery.backup = result;
+    const summary = result.summary;
+    $('#backup-created-at').textContent = `${summary.fileName ? `${summary.fileName} · ` : ''}Created ${savedDate(summary.createdAt)}`;
+    const counts = [['Local drafts', summary.draftCount], ['Queued versions', summary.queuedCount], ['Images', summary.assetCount], ['Categories', summary.categoryCount], ['Saved versions', summary.historyCount]];
+    $('#backup-counts').innerHTML = counts.map(([name, count]) => `<div><dt>${name}</dt><dd>${Number(count || 0).toLocaleString()}</dd></div>`).join('');
+    const collisions = Number(summary.existingDraftCollisions || 0);
+    $('#backup-collisions').textContent = state.recoveryMode ? 'The original unreadable workspace file will be kept in a separate recovery checkpoint. This backup will restore your local workspace.' : collisions ? `${collisions} ${collisions === 1 ? 'article already has' : 'articles already have'} a local draft. Your current drafts will be kept; conflicting imported versions will be available in History & recovery.` : 'Your current local work will be kept. The backup will be merged into this Mac’s library.';
+    $('#backup-queue-note').textContent = state.recoveryMode ? 'Imported queued articles become local drafts or saved history. They will not publish automatically.' : 'Imported queued articles become local drafts or saved history. They will not publish automatically. Your existing publish queue stays unchanged.';
+    $('#backup-preview').hidden = false; $('#restore-backup-button').hidden = false;
+  } catch (error) { $('#backup-error').className = 'inline-error'; $('#backup-error').textContent = error.message || String(error); $('#backup-error').hidden = false; }
+  finally { setBackupBusy(false); }
+}
+async function restoreBackup() {
+  const backup = recovery.backup;
+  if (!backup || recovery.busy) return;
+  setBackupBusy(true); setTransition(true); $('#backup-error').hidden = true;
+  try {
+    const snapshot = await api.restoreBackup(backup.token, backup.expectedStateRevision || backup.summary.stateRevision);
+    recovery.backup = null;
+    applySnapshot(snapshot);
+    if (!state.active && state.articles.length) loadDocument(state.articles.find((article) => article.isDraft) || state.articles[0]);
+    $('#backup-dialog').close();
+    showToast('Backup restored locally. Imported queued versions were not published.');
+  } catch (error) { $('#backup-error').className = 'inline-error'; $('#backup-error').textContent = error.message || String(error); $('#backup-error').hidden = false; }
+  finally { setBackupBusy(false); setTransition(false); }
+}
+function newCategory() {
+  if (state.recoveryMode || !state.ready || state.busy || state.publishing || state.transitioning || document.querySelector('dialog[open]')) return;
   $('#category-name').value = '';
   $('#category-error').hidden = true;
   $('#category-dialog').showModal();
@@ -577,6 +897,7 @@ function newCategory() {
 }
 async function createCategory(event) {
   event.preventDefault();
+  if (state.recoveryMode) return;
   if ($('#create-category-button').disabled) return;
   const name = $('#category-name').value.normalize('NFC').trim();
   if (!name || [...name].length > 80 || /[\u0000-\u001f\u007f-\u009f]/u.test(name)) {
@@ -609,7 +930,7 @@ async function createCategory(event) {
   }
 }
 async function newArticle() {
-  if (!state.ready || state.transitioning || document.querySelector('dialog[open]')) return;
+  if (state.recoveryMode || !state.ready || state.busy || state.publishing || state.transitioning || document.querySelector('dialog[open]')) return;
   $('#new-title').value = '';
   $('#new-category').value = state.filter.startsWith('category:') ? state.filter.slice(9) : 'Articles';
   $('#new-date').value = today();
@@ -619,6 +940,7 @@ async function newArticle() {
 }
 async function createArticle(event) {
   event.preventDefault();
+  if (state.recoveryMode) return;
   const title = $('#new-title').value.trim();
   const category = $('#new-category').value.trim();
   const date = $('#new-date').value;
@@ -643,7 +965,7 @@ async function createArticle(event) {
   finally { $('#create-button').disabled = false; setTransition(false); }
 }
 async function addImage() {
-  if (!state.active) return;
+  if (state.recoveryMode || !state.active) return;
   const path = state.active.path;
   try {
     const asset = await api.chooseImage();
@@ -657,7 +979,7 @@ async function addImage() {
   } catch (error) { showError(error); }
 }
 async function reviewConflict() {
-  if (!state.active?.conflict || state.busy || state.transitioning) return;
+  if (state.recoveryMode || !state.active?.conflict || state.busy || state.transitioning) return;
   setTransition(true);
   try {
     await saveCurrent();
@@ -671,7 +993,7 @@ async function reviewConflict() {
   finally { setTransition(false); }
 }
 async function saveResolution() {
-  if (!state.active) return;
+  if (state.recoveryMode || !state.active) return;
   const path = state.active.path;
   $('#resolve-button').disabled = true;
   try {
@@ -687,13 +1009,13 @@ async function saveResolution() {
   finally { $('#resolve-button').disabled = false; }
 }
 async function discardCurrent() {
-  if (!state.active || state.active.isQueued) return;
+  if (state.recoveryMode || !state.active || state.active.isQueued) return;
   $('#confirm-message').textContent = state.active.path.startsWith('_docs/') ? 'This removes your unpublished changes from this Mac. The online article will stay unchanged.' : 'This removes your local page edits. The online page will stay unchanged.';
   $('#confirm-dialog').showModal();
 }
 async function confirmDiscard() {
   const path = state.active?.path;
-  if (!path) return;
+  if (state.recoveryMode || !path) return;
   clearTimeout(autosaveTimer);
   $('#confirm-discard').disabled = true;
   setTransition(true);
@@ -717,12 +1039,14 @@ async function bootstrap() {
     const snapshot = await api.bootstrap();
     applySnapshot(snapshot);
     state.ready = true;
+    applyWorkspaceAccess();
     let remembered;
     try { remembered = localStorage.getItem('nightingale.selectedPath'); } catch { /* Preference storage is optional. */ }
     const first = state.articles.find((item) => item.path === remembered) || [...state.articles].filter((item) => item.path.startsWith('_docs/')).sort((a, b) => b.meta.date.localeCompare(a.meta.date))[0] || state.articles[0];
     if (first) loadDocument(first);
-    else $('#empty-message').textContent = 'Create your first article. Everything you save stays local until you publish.';
+    else $('#empty-message').textContent = state.recoveryMode ? 'Open Backups to restore your local workspace.' : 'Create your first article. Everything you save stays local until you publish.';
     renderStatus();
+    void pollPublications({ force: true });
   } catch (error) {
     $('#empty-title').textContent = 'Let’s open your library.';
     $('#empty-message').textContent = error.message || String(error);
@@ -762,12 +1086,33 @@ $('#details-button').addEventListener('click', () => { const visible = $('#extra
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => setView(button.dataset.view)));
 document.querySelectorAll('[data-preview-device]').forEach((button) => button.addEventListener('click', () => setPreviewDevice(button.dataset.previewDevice)));
 $('#site-preview-frame').addEventListener('load', () => { previewArticlePath = null; renderPreview(); });
-document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => $(`#${button.dataset.close}`).close()));
+document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => {
+  if (recovery.busy && ['history-dialog', 'backup-dialog'].includes(button.dataset.close)) return;
+  $(`#${button.dataset.close}`).close();
+}));
+$('#history-button').addEventListener('click', () => openHistory(state.active?.path));
+$('#global-history-button').addEventListener('click', () => openHistory());
+$('#history-all-button').addEventListener('click', () => loadHistoryList());
+$('#history-list').addEventListener('click', (event) => { const button = event.target.closest('[data-history-index]'); if (button) selectHistoryVersion(Number(button.dataset.historyIndex)); });
+$('#history-restore-button').addEventListener('click', restoreSelectedHistory);
+$('#history-cancel-queue').addEventListener('click', cancelHistoryQueue);
+$('#history-dialog').addEventListener('close', () => { recovery.history = null; recovery.historyGeneration++; });
+$('#backups-button').addEventListener('click', openBackups);
+$('#recovery-backups-button').addEventListener('click', openBackups);
+$('#export-backup-button').addEventListener('click', exportBackup);
+$('#choose-backup-button').addEventListener('click', chooseBackup);
+$('#restore-backup-button').addEventListener('click', restoreBackup);
+$('#backup-dialog').addEventListener('close', () => { if (recovery.backup) { recovery.backup = null; api.cancelBackupImport().catch(() => {}); } });
+for (const selector of ['#history-dialog', '#backup-dialog']) $(selector).addEventListener('cancel', (event) => { if (recovery.busy) event.preventDefault(); });
+$('#validation-issues').addEventListener('click', (event) => { const button = event.target.closest('[data-validation-issue]'); if (button) goToPublicationIssue(Number(button.dataset.validationIssue)); });
+$('#validation-publish-button').addEventListener('click', publishAfterWarnings);
+$('#validation-dialog').addEventListener('close', () => { recovery.validation = null; });
+for (const selector of ['#publication-build-link', '#publication-live-link']) $(selector).addEventListener('click', async (event) => { event.preventDefault(); const url = safeExternalURL(event.currentTarget.href); if (url) { try { await api.openExternal(url); } catch (error) { showError(error); } } });
 $('#review-conflict-button').addEventListener('click', reviewConflict);
 $('#keep-local-button').addEventListener('click', () => { $('#conflict-resolved').value = $('#conflict-local').value; });
 $('#keep-remote-button').addEventListener('click', () => { $('#conflict-resolved').value = $('#conflict-remote').value; });
 $('#resolve-button').addEventListener('click', saveResolution);
-$('#cancel-queue-button').addEventListener('click', async () => { if (!state.active) return; try { applySnapshot(await api.cancel(state.active.path)); showToast('Queued publication cancelled. Your draft stays on this Mac.'); } catch (error) { showError(error); } });
+$('#cancel-queue-button').addEventListener('click', async () => { if (state.recoveryMode || !state.active) return; try { applySnapshot(await api.cancel(state.active.path)); showToast('Queued publication cancelled. Your draft stays on this Mac.'); } catch (error) { showError(error); } });
 $('#discard-button').addEventListener('click', discardCurrent);
 $('#confirm-cancel').addEventListener('click', () => $('#confirm-dialog').close());
 $('#confirm-discard').addEventListener('click', confirmDiscard);
@@ -777,10 +1122,11 @@ document.addEventListener('keydown', (event) => {
   if (event.key.toLowerCase() === 'n') { event.preventDefault(); newArticle(); }
   if (event.key.toLowerCase() === 'f') { event.preventDefault(); $('#search').focus(); $('#search').select(); }
 });
-window.addEventListener('online', () => { if (state.articles.some((item) => item.isQueued)) runSync({ quiet: true, publish: true }); });
+window.addEventListener('online', () => { if (state.articles.some((item) => item.isQueued)) runSync({ quiet: true, publish: true }); else void pollPublications({ force: true }); });
 setInterval(() => { if (state.ready && state.articles.some((item) => item.isQueued && !item.conflict)) runSync({ quiet: true, publish: true }); }, 30000);
+setInterval(() => { void pollPublications(); }, 15000);
 window.writer = {
-  async flushBeforeClose() { setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
-  newArticle, saveCurrent, refresh: () => runSync(), publishCurrent,
+  async flushBeforeClose() { if (recovery.busy) throw new Error('Wait for the backup or restore operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
+  newArticle, saveCurrent, refresh: () => runSync(), publishCurrent, showHistory: () => openHistory(state.active?.path), showAllHistory: () => openHistory(), showBackups: openBackups,
 };
 bootstrap();
