@@ -1,0 +1,23 @@
+[
+  {
+    "name": "kramdown",
+    "version": "2.4.0",
+    "url": "https://rubygems.org/downloads/kramdown-2.4.0.gem",
+    "sha256": "b62e5bcbd6ea20c7a6730ebbb2a107237856e14f29cebf5b10c876cc1a2481c5",
+    "verified_against": "https://rubygems.org/api/v2/rubygems/kramdown/versions/2.4.0.json"
+  },
+  {
+    "name": "kramdown-parser-gfm",
+    "version": "1.1.0",
+    "url": "https://rubygems.org/downloads/kramdown-parser-gfm-1.1.0.gem",
+    "sha256": "fb39745516427d2988543bf01fc4cf0ab1149476382393e0e9c48592f6581729",
+    "verified_against": "https://rubygems.org/api/v2/rubygems/kramdown-parser-gfm/versions/1.1.0.json"
+  },
+  {
+    "name": "rexml",
+    "version": "3.4.4",
+    "url": "https://rubygems.org/downloads/rexml-3.4.4.gem",
+    "sha256": "19e0a2c3425dfbf2d4fc1189747bdb2f849b6c5e74180401b15734bc97b5d142",
+    "verified_against": "https://rubygems.org/api/v2/rubygems/rexml/versions/3.4.4.json"
+  }
+]
