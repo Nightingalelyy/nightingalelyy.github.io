@@ -2,10 +2,12 @@
 # Site
 
 title: Yuyang Liu's Blog
-url: "nightingalelyy.github.io"
+url: "https://nightingalelyy.github.io"
 baseurl:
 google_analytics_key:
 show_full_navigation: true
+personal_categories:
+  - 个人随笔
 
 # Values for the jekyll-seo-tag gem (https://github.com/jekyll/jekyll-seo-tag)
 logo: /siteicon.png
@@ -43,6 +45,7 @@ exclude:
   - .pages.yml
   - desktop
   - publishing
+  - tests
   - vendor
   - Gemfile
   - Gemfile.lock

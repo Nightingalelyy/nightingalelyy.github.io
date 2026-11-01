@@ -1,0 +1,91 @@
+{% assign discovery_articles = site.docs %}
+{% unless site.unpublished %}
+  {% assign discovery_articles = discovery_articles | where_exp: 'doc', 'doc.published != false' %}
+{% endunless %}
+{% assign undated_articles = discovery_articles | where_exp: 'doc', 'doc.date == nil' %}
+{% assign dated_articles = discovery_articles | where_exp: 'doc', 'doc.date != nil' | sort: 'date' | reverse %}
+{% assign past_articles = dated_articles | where_exp: 'doc', 'doc.date <= site.time' %}
+{% assign discovery_articles = undated_articles | concat: past_articles %}
+{% if site.future %}
+  {% assign future_articles = dated_articles | where_exp: 'doc', 'doc.date > site.time' %}
+  {% assign discovery_articles = future_articles | concat: discovery_articles %}
+{% endif %}
+{% assign personal_categories = site.personal_categories %}
+{% assign personal_articles = discovery_articles | where_exp: 'doc', 'personal_categories contains doc.category' %}
+{% assign coding_count = discovery_articles.size | minus: personal_articles.size %}
+
+<div class="site-discovery">
+  <nav class="discovery-links" aria-label="Explore the writing">
+    <a href="{{ '/archive/' | relative_url | escape }}">All articles <span class="discovery-count">{{ discovery_articles.size }}</span></a>
+    <a href="{{ '/categories/' | relative_url | escape }}">Browse categories</a>
+    <a href="{{ '/search/' | relative_url | escape }}">Search</a>
+  </nav>
+
+  <section class="discovery-section" aria-labelledby="recent-writing">
+    <div class="discovery-heading">
+      <h2 id="recent-writing">Recent writing</h2>
+      <a href="{{ '/archive/' | relative_url | escape }}">View the archive</a>
+    </div>
+    {% if discovery_articles.size > 0 %}
+      <div class="discovery-grid">
+        {% for item in discovery_articles limit: 6 %}
+          <div class="discovery-card">
+            <p class="discovery-meta">
+              <time datetime="{{ item.date | default: site.time | date_to_xmlschema | escape }}">{{ item.date | default: site.time | date: '%b %-d, %Y' }}</time>
+              <span>{{ item.category | default: 'Uncategorized' | escape }}</span>
+            </p>
+            <h3 class="discovery-card-title"><a href="{{ item.url | relative_url | escape }}">{{ item.title | escape }}</a></h3>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="discovery-empty">No articles have been published yet.</p>
+    {% endif %}
+  </section>
+
+  <div class="discovery-grid discovery-topics">
+    <section class="discovery-section" aria-labelledby="coding-notes">
+      <div class="discovery-heading">
+        <h2 id="coding-notes">Coding notes <span class="discovery-count">{{ coding_count }}</span></h2>
+      </div>
+      <p class="discovery-card-description">Algorithms, data structures, and problem-solving notes.</p>
+      {% if coding_count > 0 %}
+        <ul class="discovery-list">
+          {% assign coding_shown = 0 %}
+          {% for item in discovery_articles %}
+            {% unless personal_categories contains item.category %}
+              <li>
+                <a href="{{ item.url | relative_url | escape }}">{{ item.title | escape }}</a>
+                <span class="discovery-meta">{{ item.category | default: 'Uncategorized' | escape }}</span>
+              </li>
+              {% assign coding_shown = coding_shown | plus: 1 %}
+              {% if coding_shown == 5 %}{% break %}{% endif %}
+            {% endunless %}
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="discovery-empty">No coding notes have been published yet.</p>
+      {% endif %}
+      <a href="{{ '/categories/' | relative_url | escape }}">Explore by category</a>
+    </section>
+
+    <section class="discovery-section" aria-labelledby="personal-essays">
+      <div class="discovery-heading">
+        <h2 id="personal-essays">Personal essays <span class="discovery-count">{{ personal_articles.size }}</span></h2>
+      </div>
+      {% if personal_articles.size > 0 %}
+        <ul class="discovery-list">
+          {% for item in personal_articles limit: 5 %}
+            <li>
+              <a href="{{ item.url | relative_url | escape }}">{{ item.title | escape }}</a>
+              <span class="discovery-meta"><time datetime="{{ item.date | default: site.time | date_to_xmlschema | escape }}">{{ item.date | default: site.time | date: '%b %-d, %Y' }}</time></span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="discovery-empty">No personal essays have been published yet.</p>
+      {% endif %}
+      <a href="{{ '/archive/' | relative_url | escape }}">Browse all writing</a>
+    </section>
+  </div>
+</div>

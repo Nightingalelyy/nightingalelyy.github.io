@@ -1,0 +1,40 @@
+---
+title: Archive
+permalink: /archive/
+discovery: true
+---
+{% assign archive_articles = site.docs %}
+{% unless site.unpublished %}
+  {% assign archive_articles = archive_articles | where_exp: 'doc', 'doc.published != false' %}
+{% endunless %}
+{% assign undated_articles = archive_articles | where_exp: 'doc', 'doc.date == nil' %}
+{% assign dated_articles = archive_articles | where_exp: 'doc', 'doc.date != nil' | sort: 'date' | reverse %}
+{% assign past_articles = dated_articles | where_exp: 'doc', 'doc.date <= site.time' %}
+{% assign archive_articles = undated_articles | concat: past_articles %}
+{% if site.future %}
+  {% assign future_articles = dated_articles | where_exp: 'doc', 'doc.date > site.time' %}
+  {% assign archive_articles = future_articles | concat: archive_articles %}
+{% endif %}
+{% assign archive_years = archive_articles | group_by_exp: 'doc', "doc.date | default: site.time | date: '%Y'" %}
+
+<div class="site-discovery">
+  <p>{{ archive_articles.size }} articles, from newest to oldest. You can also <a href="{{ '/categories/' | relative_url | escape }}">browse by category</a> or <a href="{{ '/search/' | relative_url | escape }}">search the site</a>.</p>
+  {% for year in archive_years %}
+    <section class="discovery-section archive-year" aria-labelledby="year-{{ forloop.index }}">
+      <div class="discovery-heading">
+        <h2 id="year-{{ forloop.index }}">{{ year.name | escape }} <span class="discovery-count">{{ year.items.size }}</span></h2>
+      </div>
+      <ul class="discovery-list">
+        {% for item in year.items %}
+          <li>
+            <time class="discovery-meta" datetime="{{ item.date | default: site.time | date_to_xmlschema | escape }}">{{ item.date | default: site.time | date: '%b %-d' }}</time>
+            <a href="{{ item.url | relative_url | escape }}">{{ item.title | escape }}</a>
+            <span class="discovery-meta">{{ item.category | default: 'Uncategorized' | escape }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% else %}
+    <p class="discovery-empty">No articles have been published yet.</p>
+  {% endfor %}
+</div>

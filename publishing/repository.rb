@@ -21,7 +21,7 @@ module Publishing
       files = []
       visit = lambda do |directory, relative|
         Dir.children(directory).sort.each do |name|
-          next if name.start_with?('.', '_') || (relative.empty? && %w[desktop publishing vendor].include?(name))
+          next if name.start_with?('.', '_') || (relative.empty? && %w[desktop publishing tests vendor].include?(name))
           absolute = File.join(directory, name)
           path = relative.empty? ? name : "#{relative}/#{name}"
           next if File.symlink?(absolute)
@@ -39,6 +39,9 @@ module Publishing
       routes = []
       routes << '/search/' if File.file?(File.join(source, 'search.html'))
       routes << '/changelog/' if File.file?(File.join(source, 'changelog.html'))
+      routes << '/archive/' if File.file?(File.join(source, 'archive.html'))
+      routes << '/categories/' if File.file?(File.join(source, 'categories.html'))
+      routes << '/search-index.json' if File.file?(File.join(source, 'search-index.json'))
       routes << '/css/main.css' if File.file?(File.join(source, 'css/main.scss'))
       routes << '/feed.xml' if Array(config['plugins']).include?('jekyll-feed')
       routes << '/sitemap.xml' if Array(config['plugins']).include?('jekyll-sitemap')

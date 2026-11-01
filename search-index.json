@@ -1,0 +1,28 @@
+---
+layout: null
+permalink: /search-index.json
+sitemap: false
+---
+[
+{% assign search_items = site.docs | sort: 'url' %}
+{% assign separator = '' %}
+{% for item in search_items %}
+  {% if item.title and item.title != empty %}
+    {% if item.published != false or site.unpublished %}
+    {% if item.date == nil or item.date <= site.time or site.future %}
+    {% unless item.excluded_in_search %}
+      {{ separator }}{
+        "title": {{ item.title | jsonify }},
+        "url": {{ item.url | relative_url | jsonify }},
+        "category": {{ item.category | default: 'Articles' | jsonify }},
+        "tags": {{ item.tags | jsonify }},
+        "date": {{ item.date | date: '%Y-%m-%d' | jsonify }},
+        "body": {{ item.content | markdownify | strip_html | normalize_whitespace | jsonify }}
+      }
+      {% assign separator = ',' %}
+    {% endunless %}
+    {% endif %}
+    {% endif %}
+  {% endif %}
+{% endfor %}
+]

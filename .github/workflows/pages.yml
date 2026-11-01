@@ -32,10 +32,19 @@ jobs:
           ruby-version: '3.3'
           bundler: '2.4.22'
           bundler-cache: true
+      - name: Set up Node for browser behavior checks
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test search and site interactions
+        run: node --test tests/*.test.mjs
       - name: Test shared publishing checks
         run: ruby publishing/test_validator.rb
       - name: Prove invalid content cannot pass the build checks
         run: bundle exec ruby publishing/test_build.rb
+      - name: Check discovery pages and article visibility
+        run: bundle exec ruby publishing/test_discovery.rb
       - name: Validate source, build, and compare published code
         env:
           JEKYLL_ENV: production

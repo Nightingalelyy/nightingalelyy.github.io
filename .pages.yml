@@ -147,6 +147,16 @@ content:
       - name: description
         label: Site description
         type: text
+      - name: personal_categories
+        label: Personal essay categories
+        type: string
+        list:
+          max: 100
+        options:
+          minlength: 1
+          maxlength: 80
+        pattern: '^[^\u0000-\u001F\u007F-\u009F]{1,80}$'
+        description: Exact category names to show under Personal essays on the homepage. Other categories appear under Coding notes.
 
 settings:
   content:
