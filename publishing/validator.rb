@@ -177,6 +177,17 @@ module Publishing
         valid = field == 'date' ? valid_date?(value) : value.is_a?(String) && !value.strip.empty?
         issue(path, 2, "metadata.#{field}", field == 'date' ? 'Enter a real calendar date, such as 2026-11-02.' : "Enter a nonempty #{field}.") unless valid
       end
+      if metadata['category'].is_a?(String) && (metadata['category'].length > 80 || metadata['category'].match?(/[\u0000-\u001f\u007f-\u009f]/))
+        issue(path, 2, 'metadata.category', 'Category names must be 1 to 80 characters without control characters or line breaks.')
+      end
+      if metadata.key?('tags')
+        tags = metadata['tags']
+        # Older Jekyll frontmatter can use a space-separated string; preserve it until edited.
+        tags = tags.split if tags.is_a?(String)
+        unless tags.is_a?(Array) && tags.length <= 30 && tags.all? { |tag| tag.is_a?(String) && !tag.strip.empty? && tag.length <= 80 && !tag.match?(/[\u0000-\u001f\u007f-\u009f]/) }
+          issue(path, 2, 'metadata.tags', 'Use up to 30 tags, each 1 to 80 characters without control characters or line breaks.')
+        end
+      end
       if metadata.key?('order')
         value = metadata['order']
         issue(path, 2, 'metadata.order', 'Navigation order must be a finite number of zero or more.') unless value.is_a?(Numeric) && value.finite? && value >= 0

@@ -25,6 +25,8 @@ in that publication. Local saves are allowed while publication issues are fixed.
 
 The validator checks metadata, calendar dates, duplicate keys/URLs, Liquid,
 unclosed top-level code fences, local images, and internal page/file links.
+Category names and tags share the editor limits: 80 characters per name and
+at most 30 tags. Tags use a list of strings; legacy Jekyll tag strings are accepted.
 Reference links and raw HTML links/images use the Markdown parser. Remote links
 are not fetched, and URL fragments are not checked. A local check reflects the
 Mac's current repository cache; the deployment repeats checks on the final tree.

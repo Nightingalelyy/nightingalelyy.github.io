@@ -19,6 +19,8 @@ For a new article, enter a title, date, category, and body. The editor generates
 date-based filename from the title when you save. Articles default to the **Articles** category; use an existing
 category for a LeetCode write-up. The category determines the navigation section,
 and the order field sorts articles within that section. Lower numbers appear first.
+Optional **Tags** help find related writing. Use up to 30 labels of at most 80
+characters each; Pages CMS and Nightingale Writer save these as a YAML list.
 
 The article editor supports formatted text and Markdown source. Use the source
 switch for existing articles with C++ code blocks or HTML such as `<sup>`. Review
