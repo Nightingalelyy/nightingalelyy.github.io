@@ -34,6 +34,10 @@ unmanaged frontmatter are preserved. New article names are generated from their
 date and title. External image URLs may not load offline; images inserted through
 the app are available locally.
 
+Press **Enter** for a visible line break in both the preview and the published
+site. Leave a blank line to start a separate paragraph. Code blocks keep their
+original spacing and line breaks.
+
 Keyboard shortcuts: **⌘N** new article, **⌘S** save locally, **⌘R** refresh,
 **⇧⌘P** publish. Closing the app waits for pending local saves.
 

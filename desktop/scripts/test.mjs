@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-execFileSync(process.execPath, ['--test', 'web/content.test.js'], {cwd: root, stdio: 'inherit'});
+execFileSync(process.execPath, ['--test', 'web/content.test.js', 'web/markdown.test.js'], {cwd: root, stdio: 'inherit'});
 const buildDir = path.join(root, '.build');
 fs.mkdirSync(path.join(buildDir, 'module-cache'), { recursive: true });
 const binary = path.join(buildDir, 'repository-tests');

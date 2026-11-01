@@ -1,5 +1,4 @@
 import { stringify } from 'yaml';
-import MarkdownIt from 'markdown-it';
 import DOMPurify from 'dompurify';
 import { EditorState, Compartment } from '@codemirror/state';
 import { EditorView, keymap, placeholder, drawSelection, highlightActiveLine } from '@codemirror/view';
@@ -8,6 +7,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
 import { api } from './api.js';
 import { parseArticle, editorFields, serializeArticle, normalizeDateForInput } from './content.js';
+import { renderMarkdown } from './markdown.js';
 
 const $ = (selector) => document.querySelector(selector);
 const icons = {
@@ -36,7 +36,6 @@ const icons = {
 function icon(name) { return `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.page}</svg>`; }
 document.querySelectorAll('[data-icon]').forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
 
-const md = new MarkdownIt({ html: true, linkify: true, breaks: false });
 const editable = new Compartment();
 const state = {
   articles: [], categories: [], active: null, parsed: null, initialFields: {}, savedRaw: '', filter: 'all', query: '', view: 'write',
@@ -307,7 +306,7 @@ function setView(view) {
 async function renderPreview() {
   if (!editor) return;
   const version = ++previewVersion;
-  const unsafe = md.render(editor.state.doc.toString());
+  const unsafe = renderMarkdown(editor.state.doc.toString());
   $('#preview').innerHTML = DOMPurify.sanitize(unsafe, {
     FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base'],
     FORBID_ATTR: ['style', 'srcset'],
