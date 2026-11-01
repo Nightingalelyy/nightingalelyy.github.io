@@ -45,9 +45,13 @@ The preview bundles the site's Merriweather, Open Sans, and Inconsolata fonts,
 so typography works offline. Desktop shows an 800 px article at a 1200 px site
 viewport, with navigation cropped away. Mobile uses a 390 px viewport. Neither
 mode scales the text. The app compiles the website's own Sass when built; future
-website theme changes require a new app build. Publishing still uses Jekyll, so
-features specific to Jekyll, such as Liquid and syntax highlighting, can differ
-from the Markdown preview.
+website theme changes require a new app build. Code blocks use bundled Rouge
+3.30.0, matching GitHub Pages, with the same token colors and code layout. Fence
+labels such as `cpp`, `c++`, `python`, and `javascript` select the language;
+unlabelled or unknown languages remain plain code. Legacy `?linenums` labels
+behave as they do on the website. Code highlighting works offline using macOS's
+system Ruby and never runs the code in an article. Publishing still uses Jekyll,
+so Jekyll-only features such as Liquid can differ from the Markdown preview.
 
 Keyboard shortcuts: **⌘N** new article, **⌘S** save locally, **⌘R** refresh,
 **⇧⌘P** publish. Closing the app waits for pending local saves.
@@ -74,7 +78,7 @@ GitHub enforces the repository's publishing permissions.
 ## Build and test
 
 Requires an Apple Silicon Mac, macOS 13 or later, Xcode Command Line Tools, and
-Node.js with npm. The installed app uses the system WebKit and Git; it does not
+Node.js with npm. The installed app uses the system WebKit, Git, and Ruby; it does not
 need Node.js or a running web server.
 
 ```sh

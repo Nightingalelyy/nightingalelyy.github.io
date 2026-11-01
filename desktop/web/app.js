@@ -7,7 +7,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
 import { api } from './api.js';
 import { parseArticle, editorFields, serializeArticle, normalizeDateForInput } from './content.js';
-import { renderMarkdown } from './markdown.js';
+import { renderMarkdownPreview, codeHighlightKey, planCodeHighlights, applyCodeHighlightResults } from './markdown.js';
 
 const $ = (selector) => document.querySelector(selector);
 const icons = {
@@ -51,6 +51,13 @@ const previewScrollPositions = new Map();
 let saveChain = Promise.resolve();
 let toastTimer;
 const assetCache = new Map();
+const rougeVersion = '3.30.0';
+const highlightCache = new Map();
+const highlightLimits = { entries: 128, cacheBytes: 4 * 1024 * 1024, blockBytes: 256 * 1024, batchBytes: 512 * 1024, batchBlocks: 64 };
+let highlightCacheBytes = 0;
+let highlightBatchActive = false;
+let pendingHighlightJob = null;
+let highlightRetryAfter = 0;
 
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -351,6 +358,124 @@ function safePreviewLink(href, path) {
     return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null;
   } catch { return null; }
 }
+function highlightKey(block) { return codeHighlightKey(block, rougeVersion); }
+function cachedHighlight(key) {
+  const cached = highlightCache.get(key);
+  if (!cached) return null;
+  highlightCache.delete(key);
+  highlightCache.set(key, cached);
+  return cached;
+}
+function cacheHighlight(key, result) {
+  const size = (key.length + result.html.length) * 2;
+  if (size > highlightLimits.cacheBytes) return;
+  if (highlightCache.has(key)) {
+    highlightCacheBytes -= highlightCache.get(key).size;
+    highlightCache.delete(key);
+  }
+  while (highlightCache.size && (highlightCache.size >= highlightLimits.entries || highlightCacheBytes + size > highlightLimits.cacheBytes)) {
+    const oldest = highlightCache.keys().next().value;
+    highlightCacheBytes -= highlightCache.get(oldest).size;
+    highlightCache.delete(oldest);
+  }
+  highlightCache.set(key, { ...result, size });
+  highlightCacheBytes += size;
+}
+function isCurrentHighlightJob(job) {
+  return job.version === previewVersion && state.active?.path === job.path && state.view !== 'write' && job.content.isConnected && previewDocument() === job.doc;
+}
+function setCodePreviewStatus(message, job) {
+  if (!isCurrentHighlightJob(job)) return;
+  let label = $('#code-preview-status');
+  if (!label) {
+    label = document.createElement('span');
+    label.id = 'code-preview-status';
+    label.className = 'preview-caption';
+    label.setAttribute('role', 'status');
+    label.setAttribute('aria-live', 'polite');
+    label.style.cssText = 'font-size:9px;min-width:0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    $('#preview-options').appendChild(label);
+  }
+  label.textContent = message;
+  label.title = message ? 'The code is still shown in full. Syntax colors will return when the local highlighter is available.' : '';
+  label.hidden = !message;
+}
+function sanitizedHighlight(result, block) {
+  if (!result || typeof result.html !== 'string' || typeof result.highlighted !== 'boolean') throw new Error('Invalid syntax highlighting result.');
+  if (result.html.length > 2 * 1024 * 1024) return { html: escapeHTML(block.code), highlighted: false, large: true };
+  const html = DOMPurify.sanitize(result.html, { ALLOWED_TAGS: ['span'], ALLOWED_ATTR: ['class'], ALLOW_DATA_ATTR: false, ALLOW_ARIA_ATTR: false });
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  if (template.content.textContent !== block.code) throw new Error('Syntax highlighting changed the code text.');
+  return { html, highlighted: result.highlighted, large: false };
+}
+function applyHighlights(job, freshResults = new Map()) {
+  if (!isCurrentHighlightJob(job)) return;
+  const scroller = job.doc.scrollingElement || job.doc.documentElement;
+  const scrollTop = scroller.scrollTop;
+  const available = new Map(freshResults);
+  for (const block of job.blocks) {
+    const key = highlightKey(block);
+    if (!available.has(key)) {
+      const cached = cachedHighlight(key);
+      if (cached) available.set(key, cached);
+    }
+  }
+  applyCodeHighlightResults(job.blocks, available, job.completed, (block, result) => {
+    const node = job.nodes.get(block.id);
+    if (!node?.isConnected || node.ownerDocument !== job.doc || node.textContent !== block.code) return false;
+    node.innerHTML = result.html;
+    return true;
+  }, rougeVersion);
+  scroller.scrollTop = scrollTop;
+}
+function highlightCandidates(job) {
+  return planCodeHighlights(job.blocks, { completed: job.completed, cache: highlightCache, version: rougeVersion, maxBlockBytes: highlightLimits.blockBytes });
+}
+function scheduleCodeHighlights(job) {
+  job.completed = new Map();
+  pendingHighlightJob = job;
+  applyHighlights(job);
+  if (!job.blocks.length) { setCodePreviewStatus('', job); pendingHighlightJob = null; return; }
+  void processCodeHighlights();
+}
+async function processCodeHighlights() {
+  if (highlightBatchActive) return;
+  highlightBatchActive = true;
+  try {
+    while (pendingHighlightJob) {
+      const job = pendingHighlightJob;
+      pendingHighlightJob = null;
+      if (!isCurrentHighlightJob(job)) continue;
+      const { missing, large } = highlightCandidates(job);
+      applyHighlights(job);
+      if (!missing.length) { setCodePreviewStatus(large ? 'Large code shown without colors' : '', job); continue; }
+      if (Date.now() < highlightRetryAfter) { setCodePreviewStatus('Code colors unavailable · plain text shown', job); continue; }
+      const batch = [];
+      let bytes = 0;
+      for (const block of missing) {
+        if (batch.length >= highlightLimits.batchBlocks || bytes + block.bytes > highlightLimits.batchBytes) break;
+        batch.push(block); bytes += block.bytes;
+      }
+      if (!batch.length || !isCurrentHighlightJob(job)) continue;
+      try {
+        const response = await api.highlightCode(batch.map(({ code, language }) => ({ code, language })));
+        if (response?.version !== rougeVersion || !Array.isArray(response.blocks) || response.blocks.length !== batch.length) throw new Error('Invalid syntax highlighting response.');
+        const results = response.blocks.map((result, index) => sanitizedHighlight(result, batch[index]));
+        results.forEach((result, index) => cacheHighlight(batch[index].key, result));
+        if (isCurrentHighlightJob(job)) {
+          applyHighlights(job, new Map(results.map((result, index) => [batch[index].key, result])));
+          const remaining = highlightCandidates(job);
+          setCodePreviewStatus(remaining.large ? 'Large code shown without colors' : '', job);
+          if (remaining.missing.length && !pendingHighlightJob) pendingHighlightJob = job;
+        }
+      } catch {
+        highlightRetryAfter = Date.now() + 30000;
+        setCodePreviewStatus('Code colors unavailable · plain text shown', job);
+      }
+    }
+  } finally { highlightBatchActive = false; }
+}
 async function renderPreview() {
   if (!editor || !state.active || state.view === 'write') return;
   const doc = previewDocument();
@@ -367,8 +492,9 @@ async function renderPreview() {
   doc.getElementById('site-preview-title').textContent = $('#title-input').value;
   doc.title = `${$('#title-input').value || siteTitle} — Website preview`;
   const content = doc.getElementById('site-preview-content');
-  const unsafe = renderMarkdown(editor.state.doc.toString());
-  content.innerHTML = DOMPurify.sanitize(unsafe, {
+  const marker = `code-${crypto.randomUUID()}`;
+  const rendered = renderMarkdownPreview(editor.state.doc.toString(), marker);
+  content.innerHTML = DOMPurify.sanitize(rendered.html, {
     FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base'],
     FORBID_ATTR: ['style', 'srcset'],
   });
@@ -383,6 +509,9 @@ async function renderPreview() {
   });
   scroller.scrollTop = scrollTop;
   const restoredTop = scroller.scrollTop;
+  const generatedNodes = new Map([...content.querySelectorAll('code[data-preview-code]')].map((node) => [node.dataset.previewCode, node]));
+  const codeBlocks = rendered.blocks.filter((block) => generatedNodes.get(block.id)?.textContent === block.code);
+  scheduleCodeHighlights({ version, path: articlePath, doc, content, nodes: generatedNodes, blocks: codeBlocks });
   const images = [...content.querySelectorAll('img')];
   await Promise.all(images.map(async (image) => {
     const source = image.getAttribute('src') || '';

@@ -27,7 +27,9 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     private var window: NSWindow!
     private var webView: WKWebView!
     private var store: RepositoryStore!
+    private var codeHighlighter: CodeHighlighter!
     private let worker = DispatchQueue(label: "io.github.nightingalelyy.writer.storage")
+    private let highlightWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.highlight", qos: .userInitiated)
     private var allowClose = false
     private var closing = false
     private var webRoot: URL!
@@ -38,6 +40,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         let root = support.appendingPathComponent("Nightingale Writer", isDirectory: true)
         let seed = Bundle.main.resourceURL?.appendingPathComponent("Seed.git", isDirectory: true)
         store = RepositoryStore(root: root, seedRepo: seed)
+        codeHighlighter = CodeHighlighter(resources: Bundle.main.resourceURL!)
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(source: bridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         controller.add(self, name: "writer")
@@ -113,6 +116,18 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         if method == "chooseImage" { chooseImage(id: id); return }
         if method == "openCMS" { openCMS(); respond(id, result: [:]); return }
         if method == "openSite" { openSite(); respond(id, result: [:]); return }
+        if method == "highlightCode" {
+            highlightWorker.async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    let result = try self.codeHighlighter.highlight(params)
+                    DispatchQueue.main.async { self.respond(id, result: result) }
+                } catch {
+                    DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) }
+                }
+            }
+            return
+        }
         let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "refresh", "queuePublish", "processQueue", "resolveConflict", "importImage", "readAsset", "cancelQueued", "discardDraft"]
         guard allowed.contains(method) else { respond(id, error: "Unknown operation."); return }
         worker.async { [weak self] in

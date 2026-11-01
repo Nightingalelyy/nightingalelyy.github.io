@@ -24,4 +24,5 @@ export const api = {
   discard: (path) => call('discardDraft', { path }),
   chooseImage: () => call('chooseImage'),
   readAsset: (path) => call('readAsset', { path }),
+  highlightCode: (blocks) => call('highlightCode', { blocks }),
 };
