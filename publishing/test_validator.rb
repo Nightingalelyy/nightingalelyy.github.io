@@ -42,6 +42,17 @@ class PublishingValidatorTest < Minitest::Test
     assert validate(article("```cpp\nunordered_map<int,int> m{ {0,-1} };\n```\n"))['ok']
   end
 
+  def test_category_and_tag_rules_match_editors
+    metadata = "title: Example\ncategory: Notes\ndate: 2026-11-02"
+    assert validate(article('Body', metadata + "\ntags: [C++, 个人随笔]"))['ok']
+    assert validate(article('Body', metadata + "\ntags: []"))['ok']
+    assert validate(article('Body', metadata + "\ntags: legacy tags"))['ok']
+    ["tags: [true]", "tags: [null]", "tags: ['']", "tags: {key: value}", "tags: ['#{'a' * 81}']", "tags: [#{Array.new(31, 'tag').join(', ')}]"].each do |tags|
+      assert_includes codes(validate(article('Body', metadata + "\n" + tags))), 'metadata.tags'
+    end
+    assert_includes codes(validate(article('Body', metadata.sub('Notes', 'a' * 81)))), 'metadata.category'
+  end
+
   def test_liquid_is_checked_in_inline_indented_html_and_prose
     ["`{{ value }}`", "    x{{value}}\n", '<pre><code>{{value}}</code></pre>', '<img src="{{value}}">', '\\{{value}}', '{% include file %}'].each do |body|
       assert_includes codes(validate(article(body))), 'liquid.unprotected', body
