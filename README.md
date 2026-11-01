@@ -38,6 +38,28 @@ offline drafts.
 Existing filenames are kept when editing, so changing a title does not change its
 URL. File renaming is disabled in the CMS to protect existing links.
 
+## Browse the site
+
+The homepage shows recent writing plus Coding notes and Personal essays. Its
+title and introductory content still come from the editable homepage file.
+In **Site settings → Personal essay categories**, list the exact category names
+that belong to personal writing; other categories appear under Coding notes.
+
+**Archive** lists all published articles by year. **Categories** groups the same
+articles with stable section links. Publishing a new article updates these views
+and the search index automatically, without changing existing article URLs.
+Future and unpublished articles follow Jekyll's publication settings.
+
+**Search** matches English and Chinese text across titles, categories, tags, and
+article content. Problem numbers such as `525` prioritize the matching title.
+Search runs locally in the browser from a static JSON index. The query stays in
+the page URL for sharing; there is no third-party search service.
+
+The mobile menu supports keyboard focus, Escape, and outside-click dismissal.
+Article headings have section links, and code blocks have a **Copy** button that
+preserves their original text. Article typography and width match the existing
+Nightingale Writer preview.
+
 ## Pages CMS connection and access
 
 The Pages CMS GitHub App should use **Only select repositories**, with only
@@ -55,6 +77,10 @@ in this repository.
 - `_docs/`: articles, organized into category folders.
 - `index.md`: homepage.
 - `_layouts/default.html`: shared page and navigation layout.
+- `_layouts/home.html` and `_includes/discovery-home.html`: editable homepage plus generated article lists.
+- `archive.html` and `categories.html`: public browsing pages.
+- `search-index.json` and `scripts/search*.js`: static Chinese/English search.
+- `scripts/site.js`: mobile navigation, heading links, and code copying.
 - `css/main.scss` and `_sass/`: styles.
 - `_config.yml`: Jekyll configuration.
 - `.pages.yml`: CMS fields, collections, and media configuration.
@@ -69,7 +95,7 @@ the article collection.
 ## Local development
 
 The repository pins Jekyll 3.10.0, kramdown 2.4.0, and Rouge 3.30.0 with its
-plugins in `Gemfile` and `Gemfile.lock`. CI uses Ruby 3.3 and Bundler 2.4.22.
+plugins in `Gemfile` and `Gemfile.lock`. CI uses Ruby 3.3, Bundler 2.4.22, and Node 24.
 
 ```sh
 bundle install
@@ -80,6 +106,8 @@ Open <http://localhost:4000>. For the same verified production build used by CI:
 
 ```sh
 bundle exec ruby publishing/validate_repository.rb --build --destination _site
+node --test tests/*.test.mjs
+bundle exec ruby publishing/test_discovery.rb
 ```
 
 Keep the repository's Pages publishing source set to **GitHub Actions**. Legacy

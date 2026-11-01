@@ -1,0 +1,14 @@
+---
+layout: default
+home: true
+---
+<div class="home-introduction">
+  <p class="discovery-meta">Writing &amp; notes</p>
+  <h1>{{ page.title | default: site.title | escape }}</h1>
+  <p>Coding notes and personal essays.</p>
+  {% assign authored_home_content = content | strip %}
+  {% if authored_home_content != '' %}
+    <div class="home-authored-content">{{ content }}</div>
+  {% endif %}
+</div>
+{% include discovery-home.html %}

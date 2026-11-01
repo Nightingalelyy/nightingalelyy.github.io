@@ -1,91 +1,78 @@
 <!DOCTYPE html>
-
-<html>
-	<head>
-		<meta charset="utf-8">
-		<meta name="viewport" content="width=device-width, initial-scale=1">
-
-		{% seo %}
-		{% feed_meta %}
-
-		<link rel="stylesheet" href="//fonts.googleapis.com/css?family=Merriweather:400,400italic,700,700italic|Open+Sans:400,400italic,600,600italic,700,700italic|Inconsolata:400,700">
-		<link rel="stylesheet" href="{{ site.baseurl }}/css/main.css">
-		<link rel="apple-touch-icon" href="{{ site.baseurl }}/apple-touch-icon.png">
-		<link rel="icon" type="image/png" href="{{ site.baseurl }}/touch-icon.png" sizes="192x192">
-		<link rel="icon" type="image/png" href="{{ site.baseurl }}/images/favicon.png">
-
-		{% if jekyll.environment == 'production' and site.google_analytics_key != '' %}
-			<script>
-				window.ga=window.ga||function(){(ga.q=ga.q||[]).push(arguments)};ga.l=+new Date;
-				ga('create', '{{ site.google_analytics_key }}', 'auto');
-				ga('send', 'pageview');
-			</script>
-			<script async src='https://www.google-analytics.com/analytics.js'></script>
-		{% endif %}
-	</head>
-
-	<body>
-		<header>
-			<h1>
-				<a href="{{ site.baseurl }}/"><img src="{{ site.baseurl }}/images/emblem.svg" width="40" height="40" alt="{{ site.title }} logo"></a>
-				{{ site.title }}
-				<button type="button" class="open-nav" id="open-nav"></button>
-			</h1>
-
-			<form action="{{ site.baseurl }}/search/" method="get">
-				<input type="text" name="q" id="search-input" placeholder="Search" autofocus>
-				<input type="submit" value="Search" style="display: none;">
-			</form>
-
-			<nav {% if site.show_full_navigation %}class="full-navigation"{% endif %}>
-				<ul>
-					<li class="nav-item top-level {% if page.url == '/' %}current{% endif %}">
-						{% assign home = site.html_pages | where: 'url', '/' | first %}
-						<a href="{{ site.baseurl }}/">{{ home.title }}</a>
-					</li>
-					<li class="nav-item top-level {% if page.url == '/admin/' %}current{% endif %}">
-						<a href="{{ site.baseurl }}/admin/">Admin</a>
-					</li>
-				</ul>
-
-				<ul>
-					{% assign grouped = site.docs | group_by: 'category' %}
-					{% for group in grouped %}
-						<li class="nav-item top-level {% if group.name == page.category %}current{% endif %}">
-							{% assign items = group.items | sort: 'order' %}
-							<a href="{{ site.baseurl }}{{ items.first.url }}">{{ group.name }}</a>
-							<ul>
-								{% for item in items %}
-									<li class="nav-item {% if item.url == page.url %}current{% endif %}"><a href="{{ site.baseurl }}{{ item.url }}">{{ item.title }}</a></li>
-								{% endfor %}
-							</ul>
-						</li>
-					{% endfor %}
-				</ul>
-
-				<ul>
-					<li class="nav-item top-level {% if page.url == '/changelog/' %}current{% endif %}">
-						{% assign changelog = site.html_pages | where: 'url', '/changelog/' | first %}
-						<a href="{{ site.baseurl }}/changelog/">{{ changelog.title }}</a>
-					</li>
-				</ul>
-			</nav>
-		</header>
-
-		<section class="main">
-			<div class="page-header">
-				<h2>{% if page.category %}{{ page.category }}{% else %}{{ site.title }}{% endif %}</h2>
-				<h3>{{ page.title }}</h3>
-			</div>
-			<article class="content">
-				{{ content }}
-			</article>
-		</section>
-
-		<script>
-			document.getElementById("open-nav").addEventListener("click", function () {
-				document.body.classList.toggle("nav-open");
-			});
-		</script>
-	</body>
+<html lang="{{ site.lang | default: 'en' | escape }}" class="no-site-js">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% seo %}
+    {% feed_meta %}
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Merriweather:400,400italic,700,700italic|Open+Sans:400,400italic,600,600italic,700,700italic|Inconsolata:400,700">
+    <link rel="stylesheet" href="{{ '/css/main.css' | relative_url | escape }}?v={{ site.time | date: '%s' }}">
+    <link rel="apple-touch-icon" href="{{ '/apple-touch-icon.png' | relative_url | escape }}">
+    <link rel="icon" type="image/png" href="{{ '/touch-icon.png' | relative_url | escape }}" sizes="192x192">
+    <link rel="icon" type="image/png" href="{{ '/images/favicon.png' | relative_url | escape }}">
+    <script defer src="{{ '/scripts/site.js' | relative_url | escape }}?v={{ site.time | date: '%s' }}"></script>
+    {% if jekyll.environment == 'production' and site.google_analytics_key and site.google_analytics_key != '' %}
+      <script>
+        window.ga=window.ga||function(){(ga.q=ga.q||[]).push(arguments)};ga.l=+new Date;
+        ga('create', {{ site.google_analytics_key | jsonify }}, 'auto');
+        ga('send', 'pageview');
+      </script>
+      <script async src="https://www.google-analytics.com/analytics.js"></script>
+    {% endif %}
+  </head>
+  <body class="site-shell">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div class="nav-backdrop" data-nav-backdrop hidden></div>
+    <header class="site-header">
+      <div class="site-brand">
+        <a href="{{ '/' | relative_url | escape }}" aria-label="{{ site.title | escape }} — home"><img src="{{ '/images/emblem.svg' | relative_url | escape }}" width="35" height="35" alt=""><span>{{ site.title | escape }}</span></a>
+        <button type="button" class="open-nav" id="open-nav" aria-expanded="false" aria-controls="site-navigation" aria-label="Open navigation"><span class="visually-hidden">Menu</span></button>
+      </div>
+      <div id="site-navigation" class="site-navigation">
+        <nav class="primary-navigation" aria-label="Main navigation">
+          <a href="{{ '/' | relative_url | escape }}"{% if page.url == '/' %} aria-current="page"{% endif %}>Home</a>
+          <a href="{{ '/archive/' | relative_url | escape }}"{% if page.url == '/archive/' %} aria-current="page"{% endif %}>Archive</a>
+          <a href="{{ '/categories/' | relative_url | escape }}"{% if page.url == '/categories/' %} aria-current="page"{% endif %}>Categories</a>
+          <a href="{{ '/search/' | relative_url | escape }}"{% if page.url == '/search/' %} aria-current="page"{% endif %}>Search</a>
+        </nav>
+        <form class="sidebar-search" action="{{ '/search/' | relative_url | escape }}" method="get" role="search" aria-label="Search this site">
+          <label class="visually-hidden" for="search-input">Search articles</label>
+          <input type="search" name="q" id="search-input" placeholder="Search articles" autocomplete="off">
+          <button type="submit" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"></path></svg></button>
+        </form>
+        <nav class="article-navigation" aria-label="Articles by category">
+          <p class="navigation-label">Browse the writing</p>
+          {% assign navigation_docs = site.docs %}
+          {% unless site.unpublished %}{% assign navigation_docs = navigation_docs | where_exp: 'doc', 'doc.published != false' %}{% endunless %}
+          {% unless site.future %}
+            {% assign undated_navigation_docs = navigation_docs | where_exp: 'doc', 'doc.date == nil' %}
+            {% assign navigation_docs = navigation_docs | where_exp: 'doc', 'doc.date <= site.time' | concat: undated_navigation_docs %}
+          {% endunless %}
+          {% assign grouped = navigation_docs | group_by: 'category' | sort: 'name' %}
+          {% for group in grouped %}
+            <details class="navigation-group"{% if page.collection == 'docs' and group.name == page.category %} open{% endif %}>
+              <summary><span>{{ group.name | default: 'Articles' | escape }}</span><span class="navigation-count">{{ group.items | size }}</span></summary>
+              <ul>
+                {% assign items = group.items | sort: 'order' %}
+                {% for item in items %}
+                  <li><a href="{{ item.url | relative_url | escape }}"{% if item.url == page.url %} aria-current="page"{% endif %}>{{ item.title | escape }}</a></li>
+                {% endfor %}
+              </ul>
+            </details>
+          {% endfor %}
+        </nav>
+        <div class="navigation-footer"><a href="{{ '/admin/' | relative_url | escape }}"{% if page.url == '/admin/' %} aria-current="page"{% endif %}>Editor login</a><span>Coding notes &amp; personal essays.</span></div>
+      </div>
+    </header>
+    <main id="main-content" class="main" tabindex="-1">
+      {% unless page.home or layout.home or page.layout == 'home' %}
+        <div class="page-header">
+          <h2>{% if page.category %}{{ page.category | escape }}{% else %}{{ site.title | escape }}{% endif %}</h2>
+          <h3>{{ page.title | escape }}</h3>
+        </div>
+      {% endunless %}
+      <article class="content"{% if page.collection == 'docs' %} data-article-content{% endif %}>{{ content }}</article>
+    </main>
+    <div class="visually-hidden" id="site-announcement" role="status" aria-live="polite" aria-atomic="true"></div>
+  </body>
 </html>

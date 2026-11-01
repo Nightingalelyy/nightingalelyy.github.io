@@ -1,32 +1,49 @@
 ---
 title: Search
+permalink: /search/
 sitemap: false
 ---
 
-<p><span id="search-process">Loading</span> results <span id="search-query-container" style="display: none;">for "<strong id="search-query"></strong>"</span></p>
-<ul id="search-results"></ul>
-
-<script>
-	window.data = {
-		{% for item in site.docs %}
-			{% if item.title %}
-				{% unless item.excluded_in_search %}
-					{% if added %},{% endif %}
-					{% assign added = false %}
-
-					"{{ item.url | slugify }}": {
-						"id": "{{ item.url | slugify }}",
-						"title": "{{ item.title | xml_escape }}",
-						"category": "{{ collection.title | xml_escape }}",
-						"url": " {{ item.url | xml_escape }}",
-						"content": {{ item.content | strip_html | replace_regex: "[\s/\n]+"," " | strip | jsonify }}
-					}
-
-					{% assign added = true %}
-				{% endunless %}
-			{% endif %}
-		{% endfor %}
-	};
-</script>
-<script src="{{ site.baseurl }}/scripts/lunr.min.js"></script>
-<script src="{{ site.baseurl }}/scripts/search.js"></script>
+<section class="search-page" data-search-index="{{ '/search-index.json' | relative_url | escape }}" data-search-baseurl="{{ site.baseurl | escape }}">
+  <form class="search-form" action="{{ '/search/' | relative_url | escape }}" method="get" role="search" aria-label="Search articles">
+    <label for="article-search-query">Search your next read</label>
+    <div class="search-controls">
+      <input id="article-search-query" name="q" type="search" placeholder="A topic, a place, or a problem number" maxlength="200" autocomplete="off" aria-describedby="search-help" />
+      <button type="submit">Search</button>
+      <button id="search-clear" type="button" hidden>Clear</button>
+    </div>
+    <p id="search-help" class="search-help">Search in English or Chinese across titles, categories, tags, and article text.</p>
+  </form>
+  <p id="search-status" class="search-status" role="status" aria-live="polite" aria-atomic="true">Enter a few words or a problem number to search.</p>
+  <button id="search-retry" type="button" hidden>Try search again</button>
+  <ol id="search-results" class="search-results" aria-label="Search results"></ol>
+  <button id="search-more" class="search-more" type="button" hidden>Show more results</button>
+  <nav class="search-browse" aria-label="Browse writing">
+    <a href="{{ '/archive/' | relative_url | escape }}">Browse all articles</a>
+    <a href="{{ '/categories/' | relative_url | escape }}">Explore categories</a>
+  </nav>
+  <noscript><p>Search needs JavaScript. You can still browse every article using the links above.</p></noscript>
+  <section id="search-recent" class="search-recent" aria-labelledby="search-recent-title">
+    <h2 id="search-recent-title">Recent writing</h2>
+    <ul>
+      {% assign recent = site.docs | sort: 'date' | reverse %}
+      {% assign recent_count = 0 %}
+      {% for item in recent %}
+        {% if item.title and item.title != empty %}
+          {% if item.published != false or site.unpublished %}
+          {% if item.date == nil or item.date <= site.time or site.future %}
+          {% unless item.excluded_in_search %}
+            {% if recent_count < 5 %}
+              <li><a href="{{ item.url | relative_url | escape }}">{{ item.title | escape }}</a></li>
+              {% assign recent_count = recent_count | plus: 1 %}
+            {% endif %}
+          {% endunless %}
+          {% endif %}
+          {% endif %}
+        {% endif %}
+      {% endfor %}
+    </ul>
+  </section>
+</section>
+<script src="{{ '/scripts/search-core.js' | relative_url | escape }}?v={{ site.time | date: '%s' }}" defer></script>
+<script src="{{ '/scripts/search.js' | relative_url | escape }}?v={{ site.time | date: '%s' }}" defer></script>

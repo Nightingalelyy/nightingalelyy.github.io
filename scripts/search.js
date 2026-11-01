@@ -1,105 +1,101 @@
----
-layout: null
----
 (function () {
-	function getQueryVariable(variable) {
-		var query = window.location.search.substring(1),
-			vars = query.split("&");
+  'use strict';
+  const page = document.querySelector('.search-page[data-search-index]');
+  if (!page) return;
+  const core = window.NightingaleSearch;
+  const form = page.querySelector('.search-form');
+  const input = document.getElementById('article-search-query');
+  const status = document.getElementById('search-status');
+  const results = document.getElementById('search-results');
+  const clear = document.getElementById('search-clear');
+  const retry = document.getElementById('search-retry');
+  const more = document.getElementById('search-more');
+  const recent = document.getElementById('search-recent');
+  const sidebarInput = document.getElementById('search-input');
+  let index = null, request = null, revision = 0, current = null, shown = 0;
+  if (!core) { status.textContent = 'Search could not load. Use the article and category links below.'; return; }
 
-		for (var i = 0; i < vars.length; i++) {
-			var pair = vars[i].split("=");
+  function appendHighlight(parent, text, terms) {
+    for (const part of core.highlightParts(text, terms)) {
+      if (!part.match) parent.append(document.createTextNode(part.text));
+      else { const mark = document.createElement('mark'); mark.textContent = part.text; parent.append(mark); }
+    }
+  }
 
-			if (pair[0] === variable) {
-				return decodeURIComponent(pair[1].replace(/\+/g, '%20')).trim();
-			}
-		}
-	}
+  function appendResults() {
+    if (!current) return;
+    const end = Math.min(current.results.length, shown + 50);
+    const fragment = document.createDocumentFragment();
+    for (const result of current.results.slice(shown, end)) {
+      const item = result.item;
+      const row = document.createElement('li'); row.className = 'search-result';
+      const title = document.createElement('h2'); title.className = 'search-result-title';
+      const link = document.createElement('a'); link.href = item.url;
+      appendHighlight(link, item.title, current.terms); title.append(link); row.append(title);
+      const meta = document.createElement('p'); meta.className = 'search-result-meta';
+      appendHighlight(meta, [item.category, item.date, ...item.tags.map((tag) => '#' + tag)].filter(Boolean).join(' · '), current.terms);
+      row.append(meta);
+      if (result.snippet) { const excerpt = document.createElement('p'); excerpt.className = 'search-result-excerpt'; appendHighlight(excerpt, result.snippet, current.terms); row.append(excerpt); }
+      fragment.append(row);
+    }
+    results.append(fragment);
+    shown = end;
+    more.hidden = shown >= current.total;
+    more.textContent = `Show ${Math.min(50, current.total - shown)} more results`;
+    status.textContent = `${current.total} ${current.total === 1 ? 'article' : 'articles'} found for “${current.query}”.${shown < current.total ? ` Showing ${shown}.` : ''}`;
+  }
 
-	function getPreview(query, content, previewLength) {
-		previewLength = previewLength || (content.length * 2);
+  function loadIndex() {
+    if (index) return Promise.resolve(index);
+    if (request) return request;
+    const url = core.safeArticleURL(page.dataset.searchIndex, window.location.href, page.dataset.searchBaseurl || '');
+    if (!url) return Promise.reject(new Error('Invalid index URL'));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    request = fetch(url, { credentials: 'omit', cache: 'no-cache', signal: controller.signal }).then(async (response) => {
+      if (!response.ok) throw new Error('Index unavailable');
+      const text = await response.text();
+      if (text.length > 20 * 1024 * 1024) throw new Error('Index too large');
+      index = core.prepareIndex(JSON.parse(text), { baseURL: window.location.href, basePath: page.dataset.searchBaseurl || '' });
+      return index;
+    }).finally(() => { clearTimeout(timeout); request = null; });
+    return request;
+  }
 
-		var parts = query.split(" "),
-			match = content.toLowerCase().indexOf(query.toLowerCase()),
-			matchLength = query.length,
-			preview;
+  async function runSearch(query, updateURL) {
+    const version = ++revision;
+    query = core.normalizeQuery(query);
+    input.value = query;
+    if (sidebarInput) sidebarInput.value = query;
+    clear.hidden = !query;
+    retry.hidden = true; more.hidden = true; recent.hidden = Boolean(query);
+    results.replaceChildren(); results.removeAttribute('aria-busy'); current = null; shown = 0;
+    if (updateURL) {
+      const url = new URL(window.location.href);
+      if (query) url.searchParams.set('q', query); else url.searchParams.delete('q');
+      try { if (url.href !== window.location.href) window.history.pushState({}, '', url); } catch (_) { /* Search still works if history is unavailable. */ }
+    }
+    if (!query) { status.textContent = 'Enter a few words or a problem number to search.'; return; }
+    if (!core.tokenize(query).length) { status.textContent = 'Try a word, a Chinese phrase, or a problem number.'; recent.hidden = false; return; }
+    status.textContent = 'Loading the article index…'; results.setAttribute('aria-busy', 'true');
+    try {
+      const ready = await loadIndex();
+      if (version !== revision) return;
+      current = core.searchIndex(ready, query);
+      if (!current.total) { status.textContent = `No articles found for “${query}”. Try fewer words or browse by category.`; recent.hidden = false; }
+      else appendResults();
+    } catch (_) {
+      if (version !== revision) return;
+      status.textContent = 'Search could not load. Check your connection and try again, or use the browse links below.';
+      retry.hidden = false; recent.hidden = false;
+    } finally { if (version === revision) results.removeAttribute('aria-busy'); }
+  }
 
-		// Find a relevant location in content
-		for (var i = 0; i < parts.length; i++) {
-			if (match >= 0) {
-				break;
-			}
-
-			match = content.toLowerCase().indexOf(parts[i].toLowerCase());
-			matchLength = parts[i].length;
-		}
-
-		// Create preview
-		if (match >= 0) {
-			var start = match - (previewLength / 2),
-				end = start > 0 ? match + matchLength + (previewLength / 2) : previewLength;
-
-			preview = content.substring(start, end).trim();
-
-			if (start > 0) {
-				preview = "..." + preview;
-			}
-
-			if (end < content.length) {
-				preview = preview + "...";
-			}
-
-			// Highlight query parts
-			preview = preview.replace(new RegExp("(" + parts.join("|") + ")", "gi"), "<strong>$1</strong>");
-		} else {
-			// Use start of content if no match found
-			preview = content.substring(0, previewLength).trim() + (content.length > previewLength ? "..." : "");
-		}
-
-		return preview;
-	}
-
-	function displaySearchResults(results, query) {
-		var searchResultsEl = document.getElementById("search-results"),
-			searchProcessEl = document.getElementById("search-process");
-
-		if (results.length) {
-			var resultsHTML = "";
-			results.forEach(function (result) {
-				var item = window.data[result.ref],
-					contentPreview = getPreview(query, item.content, 170),
-					titlePreview = getPreview(query, item.title);
-
-				resultsHTML += "<li><h4><a href='{{ site.baseurl }}" + item.url.trim() + "'>" + titlePreview + "</a></h4><p><small>" + contentPreview + "</small></p></li>";
-			});
-
-			searchResultsEl.innerHTML = resultsHTML;
-			searchProcessEl.innerText = "Showing";
-		} else {
-			searchResultsEl.style.display = "none";
-			searchProcessEl.innerText = "No";
-		}
-	}
-
-	window.index = lunr(function () {
-		this.field("id");
-		this.field("title", {boost: 10});
-		this.field("category");
-		this.field("url");
-		this.field("content");
-	});
-
-	var query = decodeURIComponent((getQueryVariable("q") || "").replace(/\+/g, "%20")),
-		searchQueryContainerEl = document.getElementById("search-query-container"),
-		searchQueryEl = document.getElementById("search-query"),
-		searchInputEl = document.getElementById("search-input");
-
-	searchInputEl.value = query;
-	searchQueryEl.innerText = query;
-	searchQueryContainerEl.style.display = "inline";
-
-	for (var key in window.data) {
-		window.index.add(window.data[key]);
-	}
-
-	displaySearchResults(window.index.search(query), query); // Hand the results off to be displayed
-})();
+  form.addEventListener('submit', (event) => { event.preventDefault(); void runSearch(input.value, true); });
+  input.addEventListener('search', () => { if (!input.value) void runSearch('', true); });
+  clear.addEventListener('click', () => { void runSearch('', true); input.focus(); });
+  retry.addEventListener('click', () => { void runSearch(input.value, false); });
+  more.addEventListener('click', () => { const first = shown; appendResults(); results.children[first]?.querySelector('a')?.focus(); });
+  window.addEventListener('popstate', () => { void runSearch(core.queryFromSearch(window.location.search), false); });
+  void runSearch(core.queryFromSearch(window.location.search), false);
+}());

@@ -1,0 +1,49 @@
+---
+title: Categories
+permalink: /categories/
+discovery: true
+---
+{% assign category_articles = site.docs %}
+{% unless site.unpublished %}
+  {% assign category_articles = category_articles | where_exp: 'doc', 'doc.published != false' %}
+{% endunless %}
+{% assign undated_articles = category_articles | where_exp: 'doc', 'doc.date == nil' %}
+{% assign dated_articles = category_articles | where_exp: 'doc', 'doc.date != nil' | sort: 'date' | reverse %}
+{% assign past_articles = dated_articles | where_exp: 'doc', 'doc.date <= site.time' %}
+{% assign category_articles = undated_articles | concat: past_articles %}
+{% if site.future %}
+  {% assign future_articles = dated_articles | where_exp: 'doc', 'doc.date > site.time' %}
+  {% assign category_articles = future_articles | concat: category_articles %}
+{% endif %}
+{% comment %}Encode the complete category name for a stable, collision-free ID. Encode the ID again in href so a browser decodes literal percent/plus characters exactly once.{% endcomment %}
+{% assign category_groups = category_articles | group_by: 'category' | sort: 'name' %}
+
+<div class="site-discovery">
+  <p>{{ category_articles.size }} articles across {{ category_groups.size }} categories. Prefer a timeline? <a href="{{ '/archive/' | relative_url | escape }}">View the archive</a>.</p>
+  {% if category_groups.size > 0 %}
+    <nav class="discovery-links" aria-label="Jump to a category">
+      {% for group in category_groups %}
+        {% assign category_id = group.name | url_encode | prepend: 'category-' %}
+        <a href="#{{ category_id | url_encode | escape }}">{{ group.name | default: 'Uncategorized' | escape }} <span class="discovery-count">{{ group.items.size }}</span></a>
+      {% endfor %}
+    </nav>
+    {% for group in category_groups %}
+      {% assign category_id = group.name | url_encode | prepend: 'category-' %}
+      <section class="discovery-section category-section" aria-labelledby="{{ category_id | escape }}">
+        <div class="discovery-heading">
+          <h2 id="{{ category_id | escape }}">{{ group.name | default: 'Uncategorized' | escape }} <span class="discovery-count">{{ group.items.size }}</span></h2>
+        </div>
+        <ul class="discovery-list">
+          {% for item in group.items %}
+            <li>
+              <a href="{{ item.url | relative_url | escape }}">{{ item.title | escape }}</a>
+              <time class="discovery-meta" datetime="{{ item.date | default: site.time | date_to_xmlschema | escape }}">{{ item.date | default: site.time | date: '%b %-d, %Y' }}</time>
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endfor %}
+  {% else %}
+    <p class="discovery-empty">No articles have been published yet.</p>
+  {% endif %}
+</div>
