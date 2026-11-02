@@ -49,6 +49,18 @@ jobs:
         env:
           JEKYLL_ENV: production
         run: bundle exec ruby publishing/validate_repository.rb --build --destination _site
+      - name: Load desktop renderer checks for website-only branches
+        if: hashFiles('desktop/package.json') == ''
+        run: |
+          # Public fixed owner repository. Restore tools only; preserve website source and HEAD.
+          git fetch --no-tags https://github.com/Nightingalelyy/nightingalelyy.github.io.git refs/heads/desktop/mac-app
+          git restore --source=FETCH_HEAD --worktree -- desktop
+      - name: Install locked preview-check dependencies
+        run: npm ci --prefix desktop
+      - name: Require desktop preview and website integrity before publishing
+        env:
+          JEKYLL_ENV: production
+        run: bundle exec node desktop/scripts/maintenance.mjs --site _site --report desktop/.build/pages-maintenance.json
       - name: Upload verified site
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
