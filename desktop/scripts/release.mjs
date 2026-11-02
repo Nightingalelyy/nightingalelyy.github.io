@@ -44,7 +44,7 @@ const payload = {
   archive: { url: `https://github.com/${repository}/releases/download/${tag}/${archiveName}`, sha256: createHash('sha256').update(archive).digest('hex'), size: archive.length },
   releaseURL: `https://github.com/${repository}/releases/tag/${tag}`,
   publishedAt: new Date().toISOString(),
-  notes: 'Signed update verification and rollback, local diagnostics, and automated preview and website integrity checks.',
+  notes: 'Optional automatic private draft sync while the app is open, reconnect retries, and safe handling of edits made during transfers. Publishing stays manual: queued articles upload only through Publish or Retry queued version. Website sync only downloads changes.',
 };
 const payloadPath = path.join(dist, 'update-payload.json');
 const envelopePath = path.join(dist, 'nightingale-writer-update.json');

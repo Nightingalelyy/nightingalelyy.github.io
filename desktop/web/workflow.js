@@ -17,6 +17,7 @@ export function publicationView(item, { dirty = false } = {}) {
     message = publication.message || messages[status] || messages.unknown;
     if (!matchesCurrent) message = `Earlier version: ${message}${item?.isDraft || dirty ? ' Your latest edits remain local.' : ''}`;
   }
+  if (item?.isQueued) message = 'This saved version is queued. Choose Retry queued version to publish it. Later edits remain local.';
   return { label, status, message, matchesCurrent, pending: status === 'uploaded' || status === 'building', tone: status === 'failed' ? 'error' : status === 'live' ? 'success' : status === 'unknown' ? 'muted' : 'progress' };
 }
 

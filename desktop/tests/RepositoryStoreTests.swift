@@ -53,6 +53,35 @@ struct RepositoryStoreTests {
     static func process(_ store: RepositoryStore) throws -> [String: Any] { try store.handle(method: "processQueue") }
     static func status(_ result: [String: Any]) -> [String: Any] { result["status"] as! [String: Any] }
 
+    static func selectedQueueTests(_ root: URL) throws {
+        let source = root.appendingPathComponent("manual-queue-source"), remote = root.appendingPathComponent("manual-queue-remote.git")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try git(["init", "-b", "main"], at: source)
+        try git(["config", "user.name", identity.name], at: source); try git(["config", "user.email", identity.email], at: source)
+        let first = "_docs/first.md", second = "_docs/second.md"
+        let original = raw("Original", body: "Published"), queued = raw("Queued", body: "Reviewed version"), newer = raw("Newer", body: "Keep these later edits local")
+        try write(original, first, at: source); try write(original, second, at: source)
+        try git(["add", "."], at: source); try git(["commit", "-m", "Manual queue fixture"], at: source)
+        try git(["clone", "--bare", source.path, remote.path])
+        let store = RepositoryStore(root: root.appendingPathComponent("manual-queue-data"), remoteURL: remote.path, seedRepo: source, identity: identity)
+        _ = try store.handle(method: "bootstrap")
+        try save(store, first, queued); try queue(store, first)
+        try save(store, second, queued); try queue(store, second)
+        let queuedRevision = try item(store, first)["queuedRevision"] as! String
+        try save(store, first, newer)
+        let initialHead = try git(["rev-parse", "main"], at: remote)
+        _ = try store.handle(method: "refresh")
+        try expect(try git(["rev-parse", "main"], at: remote) == initialHead, "Website refresh cannot publish either queued article")
+        try rejects("A selected retry must supply the exact queued revision") { _ = try store.handle(method: "processQueue", params: ["path": first]) }
+        try rejects("A stale queued revision must not upload any article") { _ = try store.handle(method: "processQueue", params: ["path": first, "expectedQueuedRevision": "stale"]) }
+        try expect(try git(["rev-parse", "main"], at: remote) == initialHead, "Rejected retries must leave the public head unchanged")
+        let finished = try store.handle(method: "processQueue", params: ["path": first, "expectedQueuedRevision": queuedRevision])
+        try expect(try git(["show", "main:" + first], at: remote) == queued, "Explicit retry publishes the reviewed snapshot")
+        try expect(try git(["show", "main:" + second], at: remote) == original, "Retrying one article must not publish another queued article")
+        try expect(try item(store, first)["rawContent"] as? String == newer, "Retrying an older queued version preserves later local edits")
+        try expect(try item(store, second)["isQueued"] as? Bool == true && status(finished)["queuedCount"] as? Int == 1, "The other queued version still waits for its own explicit retry")
+    }
+
     static func deletionTests(_ root: URL) throws {
         let source = root.appendingPathComponent("deletion-source"), remote = root.appendingPathComponent("deletion-remote.git")
         let app = root.appendingPathComponent("deletion-data")
@@ -794,6 +823,7 @@ struct RepositoryStoreTests {
             try expect(try git(["rev-parse", "main"], at: remote) == unchangedRemote, "Template management and import must never publish")
         }
 
+        try selectedQueueTests(root)
         try deletionTests(root)
 
         print("RepositoryStore integration tests passed: \(assertions) assertions")

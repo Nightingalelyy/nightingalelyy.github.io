@@ -12,6 +12,8 @@ import { installWritingTools } from './writing-tools.js';
 import { installManagement } from './management.js';
 import { installPrivateSync } from './private-sync.js';
 import { installUpdates } from './updates.js';
+import { createPrivateSyncScheduler } from './auto-private-sync.js';
+import { createPrivateAutoOperation, preservePrivateActive } from './private-auto-operation.js';
 
 const $ = (selector) => document.querySelector(selector);
 const icons = {
@@ -57,6 +59,14 @@ let writingTools;
 let management;
 let privateSync;
 let updates;
+let autoPrivateSync;
+let privateAutoOperation;
+let privateConfiguration = '';
+let autoPrivateRuntime = { inFlight: false, phase: 'off' };
+let privateAutoGeneration = 0;
+let closingForExit = false;
+let nativeNetworkOnline;
+let networkObservation = 0;
 let mediaBusy = false;
 let autosaveTimer;
 let previewTimer;
@@ -118,14 +128,17 @@ function showError(error) {
   return message;
 }
 function updateArticle(item) {
+  snapshotGeneration++;
   const index = state.articles.findIndex((entry) => entry.path === item.path);
   const previous = index >= 0 ? state.articles[index] : null;
   const publication = item.publication || previous?.publication;
   const next = enrich({ ...item, ...(publication ? { publication: { ...publication, matchesCurrentRevision: publication.sourceSHA256 === item.revision } } : {}) });
   if (index === -1) state.articles.unshift(next); else state.articles[index] = next;
+  if (next.isDraft && previous?.revision !== next.revision) autoPrivateSync?.changed();
   return next;
 }
-function applySnapshot(snapshot, { updateDocument = true } = {}) {
+function applySnapshot(snapshot, { updateDocument = true, fromPrivateSync = false } = {}) {
+  if (fromPrivateSync) snapshot = preservePrivateActive(snapshot, state.active);
   snapshotGeneration++;
   if (snapshot?.categoryChange && state.filter === `category:${snapshot.categoryChange.from}`) state.filter = `category:${snapshot.categoryChange.to}`;
   if (snapshot?.recovery) {
@@ -142,16 +155,17 @@ function applySnapshot(snapshot, { updateDocument = true } = {}) {
   if (Array.isArray(snapshot?.publications)) state.publications = snapshot.publications;
   if (Array.isArray(snapshot?.deletions)) state.deletions = snapshot.deletions;
   if (snapshot?.status) state.status = snapshot.status;
-  if (updateDocument && state.active) {
+  if ((updateDocument || fromPrivateSync) && state.active) {
     const updated = state.articles.find((article) => article.path === state.active.path);
-    if (updated && !isDirty() && updated.rawContent !== state.savedRaw) {
+    if (updateDocument && updated && !isDirty() && updated.rawContent !== state.savedRaw) {
       loadDocument(updated);
     } else if (updated) {
-      state.active = { ...state.active, isDraft: updated.isDraft, isQueued: updated.isQueued, conflict: updated.conflict, publication: updated.publication };
+      state.active = { ...state.active, isDraft: updated.isDraft, isQueued: updated.isQueued, queuedRevision: updated.queuedRevision, conflict: updated.conflict, publication: updated.publication };
     }
   }
   privateSync?.update(snapshot);
   applyWorkspaceAccess(); renderLibrary(); renderStatus(); renderDocumentStatus(); renderDeletions();
+  autoPrivateSync?.contextChanged();
 }
 function applyWorkspaceAccess() {
   const readOnly = state.recoveryMode || state.transitioning;
@@ -164,6 +178,7 @@ function applyWorkspaceAccess() {
   writingTools?.refresh();
   privateSync?.refresh();
   updates?.refresh();
+  autoPrivateSync?.contextChanged();
   for (const id of ['manage-categories-button', 'templates-button', 'paste-image-button']) $(`#${id}`).disabled = readOnly || state.busy || state.publishing || !state.ready;
 }
 function applyPublicationSnapshot(snapshot) {
@@ -247,7 +262,7 @@ function renderStatus() {
   else if (conflicts) { text = `${conflicts} ${conflicts === 1 ? 'article needs' : 'articles need'} review before publishing`; color = 'amber'; }
   else if (stateName.includes('auth')) { text = status.message || 'GitHub sign-in needs attention. Your drafts are saved locally.'; color = 'amber'; }
   else if (stateName.includes('offline') || stateName.includes('error')) { color = 'amber'; }
-  else if (queued) { text = `${queued} ${queued === 1 ? 'article' : 'articles'} waiting to publish · retrying when connected`; color = 'blue'; }
+  else if (queued) { text = `${queued} queued ${queued === 1 ? 'version waits' : 'versions wait'} for your explicit retry`; color = 'blue'; }
   $('#connection-status').textContent = text;
   $('#connection-status').title = text;
   $('#connection-dot').className = `status-dot ${color}`;
@@ -278,8 +293,10 @@ function renderDocumentStatus() {
   $('#discard-button').disabled = state.recoveryMode || state.active.isQueued || state.busy;
   $('#discard-button').title = state.active.isQueued ? 'Cancel the queued publish before discarding' : 'Discard local changes';
   $('#cancel-queue-button').hidden = !state.active.isQueued;
-  $('#cancel-queue-button').disabled = state.recoveryMode || state.busy;
-  $('#queued-banner').hidden = !state.active.isQueued || Boolean(state.active.conflict);
+  $('#cancel-queue-button').disabled = state.recoveryMode || state.busy || state.transitioning || state.publishing;
+  $('#queued-banner').hidden = !state.active.isQueued;
+  $('#retry-queued-button').disabled = state.recoveryMode || state.busy || state.transitioning || state.publishing || Boolean(state.active.conflict) || privateConflict || !state.active.queuedRevision;
+  $('#queued-message').textContent = state.active.conflict || privateConflict ? 'Review the conflict before retrying this queued version, or cancel its publication.' : 'This queued version waits for your explicit retry. Later edits remain local.';
   $('#conflict-banner').hidden = !state.active.conflict;
   $('#publication-banner').hidden = state.recoveryMode || !state.active.publication;
   $('#publication-banner').className = `notice publication-notice publication-${publication.tone}`;
@@ -652,22 +669,29 @@ async function renderPreview() {
   }));
   if (version === previewVersion && Math.abs(scroller.scrollTop - restoredTop) < 2) scroller.scrollTop = scrollTop;
 }
-async function runSync({ publish = false, quiet = false } = {}) {
+async function runSync({ publication = null, quiet = false } = {}) {
   if (state.recoveryMode || state.busy || state.transitioning || !state.ready || document.querySelector('dialog[open]')) return;
   state.busy = true; setTransition(true); renderStatus(); renderDocumentStatus();
   try {
     await saveCurrent();
-    const queued = state.articles.some((item) => item.isQueued);
-    const snapshot = publish || queued ? await api.process() : await api.refresh();
+    const snapshot = publication ? await api.process(publication.path, publication.revision) : await api.refresh();
     applySnapshot(snapshot);
-    if (!quiet && !snapshot.articles?.some((item) => item.conflict)) {
-      const count = snapshot.status?.queuedCount || 0;
-      if (count) showToast(snapshot.status?.message || 'Publication is queued. Your saved version will retry when connected.');
+    if (!quiet) {
+      const selected = publication && snapshot.articles?.find(item => item.path === publication.path);
+      if (selected?.conflict || selected && privateSync?.hasConflict(selected.path)) showToast('This queued version needs conflict review before publication.', true);
+      else if (selected?.isQueued) showToast(snapshot.status?.message || 'This version remains queued. Retry it explicitly when connected.');
+      else if (publication && selected) showToast('Uploaded this queued version to GitHub. Checking website publication.');
       else if (String(snapshot.status?.state || '').match(/error|offline|auth/i)) showToast(snapshot.status?.message || 'Could not connect. Your local drafts are safe.', true);
-      else showToast(publish ? 'Uploaded to GitHub. Checking website publication.' : 'Your library is up to date.');
+      else showToast(publication ? 'Refresh the library to confirm this article’s publication.' : 'Your library is up to date. Queued publication remains manual.');
     }
   } catch (error) { if (!quiet) showError(error); }
   finally { state.busy = false; setTransition(false); renderStatus(); renderDocumentStatus(); void pollPublications({ force: true }); }
+}
+async function retryQueuedPublication() {
+  const item = state.active;
+  if (!item?.isQueued || !item.queuedRevision || item.conflict || privateSync?.hasConflict(item.path) || state.recoveryMode || state.busy || state.transitioning || state.publishing || mediaBusy || document.querySelector('dialog[open]')) return;
+  // Capture the reviewed queued snapshot before saving any newer local edits.
+  await runSync({ publication: { path: item.path, revision: item.queuedRevision } });
 }
 async function publishCurrent() {
   if (state.transitioning || mediaBusy) return;
@@ -686,8 +710,9 @@ async function publishCurrent() {
       return;
     }
     setTransition(false);
-    applySnapshot(await api.queue(path, report.revision || revision));
-    await runSync({ publish: true });
+    const queued = await api.queue(path, report.revision || revision);
+    applySnapshot(queued);
+    await runSync({ publication: { path, revision: queued.articles?.find(item => item.path === path)?.queuedRevision || report.revision || revision } });
   } catch (error) { showError(error); }
   finally { state.publishing = false; setTransition(false); renderDocumentStatus(); }
 }
@@ -715,8 +740,9 @@ async function publishAfterWarnings() {
   state.publishing = true;
   try {
     $('#validation-dialog').close();
-    applySnapshot(await api.queue(context.path, context.revision));
-    await runSync({ publish: true });
+    const queued = await api.queue(context.path, context.revision);
+    applySnapshot(queued);
+    await runSync({ publication: { path: context.path, revision: queued.articles?.find(item => item.path === context.path)?.queuedRevision || context.revision } });
   } catch (error) { showError(error); }
   finally { state.publishing = false; renderDocumentStatus(); }
 }
@@ -1265,7 +1291,7 @@ async function refreshDeletions() {
     const snapshot = await api.pollPublicationStatus();
     if (generation === snapshotGeneration) applyPublicationSnapshot(snapshot);
   } catch (error) { $('#deletions-error').textContent = error.message || String(error); $('#deletions-error').hidden = false; }
-  finally { removal.refreshing = false; renderDeletions(); }
+  finally { removal.refreshing = false; renderDeletions(); autoPrivateSync?.contextChanged(); }
 }
 async function restoreRemoval(path) {
   if (state.recoveryMode || removal.busy || state.busy || state.publishing || state.transitioning) return;
@@ -1422,7 +1448,8 @@ $('#review-conflict-button').addEventListener('click', reviewConflict);
 $('#keep-local-button').addEventListener('click', () => { $('#conflict-resolved').value = $('#conflict-local').value; });
 $('#keep-remote-button').addEventListener('click', () => { $('#conflict-resolved').value = $('#conflict-remote').value; });
 $('#resolve-button').addEventListener('click', saveResolution);
-$('#cancel-queue-button').addEventListener('click', async () => { if (state.recoveryMode || !state.active) return; try { applySnapshot(await api.cancel(state.active.path)); showToast('Queued publication cancelled. Your draft stays on this Mac.'); } catch (error) { showError(error); } });
+$('#cancel-queue-button').addEventListener('click', async () => { if (state.recoveryMode || !state.active || state.busy || state.transitioning || state.publishing) return; const path = state.active.path; setTransition(true); try { applySnapshot(await api.cancel(path)); showToast('Queued publication cancelled. Your draft stays on this Mac.'); } catch (error) { showError(error); } finally { setTransition(false); } });
+$('#retry-queued-button').addEventListener('click', retryQueuedPublication);
 $('#discard-button').addEventListener('click', discardCurrent);
 $('#confirm-cancel').addEventListener('click', () => $('#confirm-dialog').close());
 $('#confirm-discard').addEventListener('click', confirmDiscard);
@@ -1435,11 +1462,56 @@ document.addEventListener('keydown', (event) => {
     else if (!event.defaultPrevented) { event.preventDefault(); if (state.view === 'preview') setView('write'); writingTools?.focusFind(); }
   }
 });
-window.addEventListener('online', () => { if (state.articles.some((item) => item.isQueued)) runSync({ quiet: true, publish: true }); else void pollPublications({ force: true }); });
-setInterval(() => { if (state.ready && state.articles.some((item) => item.isQueued && !item.conflict)) runSync({ quiet: true, publish: true }); }, 30000);
+function privateNetworkOnline() { return nativeNetworkOnline ?? (navigator.onLine !== false); }
+function updatePrivateNetwork(available) {
+  networkObservation++;
+  if (typeof available === 'boolean') nativeNetworkOnline = available;
+  autoPrivateSync?.networkChanged(privateNetworkOnline());
+}
+function privateAutoIdle() {
+  return !state.busy && !state.transitioning && !state.publishing && !mediaBusy && !removal.busy && !removal.refreshing && !recovery.busy && !management?.isBusy() && !privateSync?.isBusy() && !updates?.isBusy() && !document.querySelector('dialog[open]');
+}
+function privateAutoEnabled() {
+  const status = privateSync?.getStatus();
+  return state.ready && !state.recoveryMode && !closingForExit && status?.enabled === true && status.autoSyncEnabled === true;
+}
+function privateSchedulerContext() {
+  const status = privateSync?.getStatus() || {};
+  return { connected: status.enabled === true, autoSyncEnabled: status.autoSyncEnabled === true, ready: state.ready && !closingForExit,
+    recoveryMode: state.recoveryMode, blocked: !privateAutoIdle(), conflictCount: (status.conflicts?.length || 0) + state.articles.filter(article => article.conflict).length, online: privateNetworkOnline(),
+    hasPendingChanges: status.state === 'ready' };
+}
+function privateStatusChanged(status) {
+  const configuration = JSON.stringify([status.repository || '', status.enabled === true, status.autoSyncEnabled === true]);
+  if (configuration !== privateConfiguration) {
+    privateConfiguration = configuration; privateAutoGeneration++;
+    if (privateAutoOperation?.isRunning()) void privateAutoOperation.cancel().catch(showError);
+  }
+  autoPrivateSync?.contextChanged();
+}
+async function refreshNativeNetwork() {
+  const observation = ++networkObservation;
+  try { const status = await api.networkStatus(); if (observation === networkObservation && typeof status.online === 'boolean') nativeNetworkOnline = status.online; }
+  catch { /* Browser connectivity remains a fallback for older native hosts. */ }
+  autoPrivateSync?.networkChanged(privateNetworkOnline());
+}
+function wakePrivateSync() { void refreshNativeNetwork().finally(() => autoPrivateSync?.wake()); }
+window.addEventListener('online', () => { void refreshNativeNetwork(); void pollPublications({ force: true }); });
+window.addEventListener('offline', () => { if (nativeNetworkOnline === undefined) autoPrivateSync?.networkChanged(false); });
+window.addEventListener('focus', wakePrivateSync);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) wakePrivateSync(); });
+document.addEventListener('close', () => autoPrivateSync?.contextChanged(), true);
 setInterval(() => { void pollPublications(); }, 15000);
 window.writer = {
-  async flushBeforeClose() { if (recovery.busy || removal.busy || mediaBusy || management?.isBusy() || privateSync?.isBusy() || updates?.isBusy() && !updates?.isHandingOff()) throw new Error('Wait for the current operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
+  async flushBeforeClose() {
+    if (recovery.busy || removal.busy || mediaBusy || management?.isBusy() || privateSync?.isBusy() || updates?.isBusy() && !updates?.isHandingOff()) throw new Error('Wait for the current operation to finish before quitting.');
+    closingForExit = true; privateAutoGeneration++; autoPrivateSync?.stop();
+    try { await privateAutoOperation?.cancel(); setTransition(true); await saveCurrent(); return true; }
+    catch (error) { closingForExit = false; autoPrivateSync?.start(); showError(error); throw error; }
+    finally { setTransition(false); }
+  },
+  resumeAfterCancelledClose() { closingForExit = false; autoPrivateSync?.start(); autoPrivateSync?.contextChanged(); },
+  networkAvailabilityChanged: updatePrivateNetwork,
   newArticle, saveCurrent, pasteImage, refresh: () => runSync(), publishCurrent, showHistory: () => openHistory(state.active?.path), showAllHistory: () => openHistory(), showBackups: openBackups, showUpdates: () => updates?.open(),
 };
 management = installManagement({ api, getSnapshot: () => ({ articles: state.articles, categories: state.categories, active: state.active }), saveActive: saveCurrent, applySnapshot, selectArticle,
@@ -1458,7 +1530,8 @@ privateSync = installPrivateSync({ api, getSnapshot: () => ({ active: state.acti
   },
   setLocked: setTransition,
   canUse: () => state.ready && !state.recoveryMode && !state.busy && !state.transitioning && !state.publishing && !mediaBusy && !removal.busy && !management?.isBusy(),
-  onError: showError, onToast: showToast,
+  onError: showError, onToast: showToast, onStatusChange: privateStatusChanged,
+  onSyncCompleted: snapshot => autoPrivateSync?.manualCompleted(snapshot),
 });
 updates = installUpdates({ api, saveActive: saveCurrent, setLocked: setTransition,
   canOpen: () => !state.busy && !state.transitioning && !state.publishing && !mediaBusy && !removal.busy && !recovery.busy && !management?.isBusy() && !privateSync?.isBusy(),
@@ -1466,4 +1539,17 @@ updates = installUpdates({ api, saveActive: saveCurrent, setLocked: setTransitio
     busy: state.busy || state.publishing || mediaBusy || removal.busy || recovery.busy || Boolean(management?.isBusy()) || Boolean(privateSync?.isBusy()) || (state.transitioning && !updates?.isBusy()),
   }), onError: showError, onToast: showToast,
 });
+privateAutoOperation = createPrivateAutoOperation({
+  begin: protectedPaths => api.syncPrivateDrafts({ automatic: true, protectedPaths }),
+  finish: (token, protectedPaths) => api.finishPrivateAutoSync(token, protectedPaths), cancel: () => api.cancelPrivateAutoSync(),
+  saveActive: saveCurrent, isEnabled: privateAutoEnabled, isIdle: privateAutoIdle, setLocked: setTransition,
+  getGeneration: () => privateAutoGeneration, protectedPaths: () => state.active ? [state.active.path] : [],
+  applySnapshot: snapshot => applySnapshot(snapshot, { updateDocument: false, fromPrivateSync: true }),
+  applyStatus: snapshot => privateSync?.update(snapshot),
+});
+autoPrivateSync = createPrivateSyncScheduler({ getContext: privateSchedulerContext, run: () => privateAutoOperation.run(),
+  onState(runtime) { autoPrivateRuntime = runtime; privateSync?.setAutomaticState(runtime); },
+});
+autoPrivateSync.start();
+void refreshNativeNetwork();
 bootstrap();

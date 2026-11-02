@@ -11,6 +11,14 @@ protocol PrivateDraftTransport {
     func verify(repository: String) throws
     func read(repository: String) throws -> PrivateDraftRemoteSnapshot
     func write(repository: String, data: Data, expectedRevision: String?) throws -> String
+    func write(repository: String, data: Data, expectedRevision: String?, beforeUpload: (() throws -> Void)?) throws -> String
+}
+
+extension PrivateDraftTransport {
+    func write(repository: String, data: Data, expectedRevision: String?, beforeUpload: (() throws -> Void)?) throws -> String {
+        try beforeUpload?()
+        return try write(repository: repository, data: data, expectedRevision: expectedRevision)
+    }
 }
 
 struct PrivateDraftCommandResult {
@@ -148,6 +156,10 @@ final class PrivateDraftGitHubTransport: PrivateDraftTransport {
     }
 
     func write(repository supplied: String, data: Data, expectedRevision: String?) throws -> String {
+        try write(repository: supplied, data: data, expectedRevision: expectedRevision, beforeUpload: nil)
+    }
+
+    func write(repository supplied: String, data: Data, expectedRevision: String?, beforeUpload: (() throws -> Void)?) throws -> String {
         let repository = try Self.canonicalRepository(supplied)
         guard !data.isEmpty, data.count <= Self.maxBytes, expectedRevision == nil || validRevision(expectedRevision!) else { throw fail("The private draft snapshot or revision is invalid.") }
         try verify(repository: repository)
@@ -171,6 +183,7 @@ final class PrivateDraftGitHubTransport: PrivateDraftTransport {
         // cannot replace existing history with a non-fast-forward commit.
         let lease = "--force-with-lease=" + Self.branch + ":" + (expectedRevision ?? "")
         try verify(repository: repository)
+        try beforeUpload?()
         _ = try git(["push", "--porcelain", lease, remote(repository), commit + ":" + Self.branch], at: directory, network: true)
         return commit
     }

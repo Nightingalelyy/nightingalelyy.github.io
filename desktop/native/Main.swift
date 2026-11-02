@@ -2,6 +2,7 @@ import AppKit
 import WebKit
 import UniformTypeIdentifiers
 import Darwin
+import Network
 
 private let bridgeScript = """
 (() => {
@@ -36,6 +37,13 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     private let deploymentWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.deployment")
     private var pendingBackup: (token: String, data: Data)?
     private let worker = DispatchQueue(label: "io.github.nightingalelyy.writer.storage")
+    private let privateAutoWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.private-auto-sync", qos: .utility)
+    // Accessed only on the storage queue. Network work never holds that queue.
+    private var privateAutoNetworkRunning = false
+    private var privateAutoToken: String?
+    private var pendingPrivateAutoResult: PrivateAutoSyncResult?
+    private let networkMonitor = NWPathMonitor()
+    private var networkIsAvailable: Bool?
     private let highlightWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.highlight", qos: .userInitiated)
     private var allowClose = false
     private var closing = false
@@ -76,6 +84,15 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         buildMenu()
         webRoot = Bundle.main.resourceURL!.appendingPathComponent("web", isDirectory: true)
         webView.loadFileURL(webRoot.appendingPathComponent("index.html"), allowingReadAccessTo: webRoot)
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            let available = path.status == .satisfied
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.networkIsAvailable = available
+                self.webView.evaluateJavaScript("window.writer?.networkAvailabilityChanged?.(\(available ? "true" : "false"))")
+            }
+        }
+        networkMonitor.start(queue: DispatchQueue(label: "io.github.nightingalelyy.writer.network"))
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -131,6 +148,15 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
               let body = message.body as? [String: Any], let id = body["id"] as? String,
               let method = body["method"] as? String else { return }
         let params = body["params"] as? [String: Any] ?? [:]
+        if method == "getNetworkStatus" { respond(id, result: ["online": networkIsAvailable.map { $0 as Any } ?? NSNull()]); return }
+        if method == "syncPrivateDrafts", params["automatic"] as? Bool == true { beginPrivateAutoSync(id: id, params: params); return }
+        if method == "finishPrivateAutoSync" || method == "cancelPrivateAutoSync" { completePrivateAutoSync(id: id, method: method, params: params); return }
+        if method == "processQueue" {
+            guard let path = params["path"] as? String, !path.isEmpty,
+                  let revision = params["expectedQueuedRevision"] as? String, !revision.isEmpty else {
+                respond(id, error: "Choose the queued article and confirm its saved version before publishing."); return
+            }
+        }
         if ["getUpdateStatus", "checkForUpdates", "downloadUpdate"].contains(method) {
             updateWorker.async { [weak self] in
                 guard let self else { return }
@@ -174,6 +200,9 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             worker.async { [weak self] in
                 guard let self = self else { return }
                 do {
+                    guard !self.privateAutoNetworkRunning, self.pendingPrivateAutoResult == nil else {
+                        throw NSError(domain: "Writer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Turn off automatic private sync and let its current transfer finish before restoring a backup."])
+                    }
                     let result = try self.store.restoreBackup(pending.data)
                     DispatchQueue.main.async { self.respond(id, result: result) }
                 } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
@@ -198,17 +227,77 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             }
             return
         }
-        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "renameCategory", "mergeCategory", "listTemplates", "saveTemplate", "removeTemplate", "refresh", "queuePublish", "processQueue", "resolveConflict", "readAsset", "cancelQueued", "discardDraft", "validatePublication", "listHistory", "readHistory", "restoreHistory", "removeLocally", "restoreLocalRemoval", "prepareDeletion", "deleteArticle", "privateSyncStatus", "configurePrivateSync", "syncPrivateDrafts", "disconnectPrivateSync", "resolvePrivateSyncConflict"]
+        let allowed: Set<String> = ["bootstrap", "status", "listArticles", "readArticle", "saveDraft", "createArticle", "createCategory", "renameCategory", "mergeCategory", "listTemplates", "saveTemplate", "removeTemplate", "refresh", "queuePublish", "processQueue", "resolveConflict", "readAsset", "cancelQueued", "discardDraft", "validatePublication", "listHistory", "readHistory", "restoreHistory", "removeLocally", "restoreLocalRemoval", "prepareDeletion", "deleteArticle", "privateSyncStatus", "configurePrivateSync", "syncPrivateDrafts", "disconnectPrivateSync", "resolvePrivateSyncConflict", "setPrivateAutoSync"]
         guard allowed.contains(method) else { respond(id, error: "Unknown operation."); return }
         worker.async { [weak self] in
             guard let self = self else { return }
             do {
+                if ["syncPrivateDrafts", "configurePrivateSync"].contains(method), self.privateAutoNetworkRunning || self.pendingPrivateAutoResult != nil {
+                    throw NSError(domain: "Writer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Automatic private sync is finishing. Try again in a moment."])
+                }
                 let result = try self.store.handle(method: method, params: params)
                 DispatchQueue.main.async { self.respond(id, result: result) }
             } catch {
                 let text = error.localizedDescription
                 DispatchQueue.main.async { self.respond(id, error: text) }
             }
+        }
+    }
+
+    private func beginPrivateAutoSync(id: String, params: [String: Any]) {
+        worker.async { [weak self] in
+            guard let self else { return }
+            do {
+                guard !self.privateAutoNetworkRunning, self.pendingPrivateAutoResult == nil else {
+                    throw NSError(domain: "Writer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Private sync is already running."])
+                }
+                guard let plan = try self.store.beginPrivateAutoSync(params) else {
+                    let snapshot = try self.store.handle(method: "bootstrap")
+                    DispatchQueue.main.async { self.respond(id, result: snapshot) }; return
+                }
+                self.privateAutoNetworkRunning = true
+                self.privateAutoToken = plan.token
+                self.privateAutoWorker.async {
+                    let result = self.store.runPrivateAutoSync(plan)
+                    self.worker.async {
+                        self.privateAutoNetworkRunning = false
+                        if self.privateAutoToken == result.token {
+                            self.pendingPrivateAutoResult = result
+                            DispatchQueue.main.async { self.respond(id, result: ["pendingToken": result.token]) }
+                        } else {
+                            // A completed upload can still acknowledge its own baseline after
+                            // cancellation, without importing remote content into the editor.
+                            _ = try? self.store.finishPrivateAutoSync(result, protectedPaths: [])
+                            DispatchQueue.main.async { self.respond(id, result: ["cancelled": true]) }
+                        }
+                    }
+                }
+            } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
+        }
+    }
+
+    private func completePrivateAutoSync(id: String, method: String, params: [String: Any]) {
+        worker.async { [weak self] in
+            guard let self else { return }
+            do {
+                if method == "cancelPrivateAutoSync" {
+                    _ = try self.store.cancelPrivateAutoSync()
+                    self.privateAutoToken = nil
+                    if let result = self.pendingPrivateAutoResult {
+                        self.pendingPrivateAutoResult = nil
+                        _ = try self.store.finishPrivateAutoSync(result, protectedPaths: [])
+                    }
+                    let snapshot = try self.store.handle(method: "bootstrap")
+                    DispatchQueue.main.async { self.respond(id, result: snapshot) }; return
+                }
+                guard let token = params["pendingToken"] as? String,
+                      let result = self.pendingPrivateAutoResult, result.token == token else {
+                    throw NSError(domain: "Writer", code: 1, userInfo: [NSLocalizedDescriptionKey: "This private sync has already finished or was cancelled."])
+                }
+                defer { self.pendingPrivateAutoResult = nil; self.privateAutoToken = nil }
+                let snapshot = try self.store.finishPrivateAutoSync(result, protectedPaths: params["protectedPaths"] as? [String] ?? [])
+                DispatchQueue.main.async { self.respond(id, result: snapshot) }
+            } catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
         }
     }
 
@@ -258,9 +347,9 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
                                 throw error
                             }
                             DispatchQueue.main.async { self.respond(id, result: handoff.status); self.allowClose = true; NSApp.terminate(nil) }
-                        } catch { DispatchQueue.main.async { self.updateHandoffInProgress = false; self.allowClose = false; self.respond(id, error: error.localizedDescription) } }
+                        } catch { DispatchQueue.main.async { self.updateHandoffInProgress = false; self.allowClose = false; self.webView.evaluateJavaScript("window.writer?.resumeAfterCancelledClose?.()"); self.respond(id, error: error.localizedDescription) } }
                     }
-                } catch { DispatchQueue.main.async { self.updateHandoffInProgress = false; self.allowClose = false; self.respond(id, error: error.localizedDescription) } }
+                } catch { DispatchQueue.main.async { self.updateHandoffInProgress = false; self.allowClose = false; self.webView.evaluateJavaScript("window.writer?.resumeAfterCancelledClose?.()"); self.respond(id, error: error.localizedDescription) } }
             }
         }
     }
@@ -442,6 +531,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
                 self.allowClose = saved
                 completion(saved)
             case .failure(let error):
+                self.webView.evaluateJavaScript("window.writer?.resumeAfterCancelledClose?.()")
                 let alert = NSAlert(); alert.messageText = "Your latest changes could not be saved."; alert.informativeText = error.localizedDescription; alert.addButton(withTitle: "Keep Writing")
                 alert.beginSheetModal(for: self.window) { _ in completion(false) }
             }

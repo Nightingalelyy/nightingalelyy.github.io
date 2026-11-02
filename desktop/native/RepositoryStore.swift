@@ -87,6 +87,8 @@ private struct WriterPrivateSyncConflict: Codable {
 
 private struct WriterPrivateSync: Codable {
     var enabled = false
+    // Optional for storage written before automatic private sync existed.
+    var autoSyncEnabled: Bool?
     var repository: String?
     var status = "disabled"
     var message = "Private draft sync is disconnected. Writing and website publishing still work normally."
@@ -113,6 +115,43 @@ private struct WriterState: Codable {
     var lastSyncedAt: String?
 }
 
+private struct PrivateSyncCapture {
+    let state: WriterState
+    let articles: [String: RepositoryArticle]
+    let commit: String?
+}
+
+struct PrivateAutoSyncPlan {
+    let token: String
+    fileprivate let sequence: UInt64
+    fileprivate let repository: String
+    fileprivate let capture: PrivateSyncCapture
+    fileprivate let protectedPaths: Set<String>
+}
+
+struct PrivateAutoSyncResult {
+    let token: String
+    fileprivate let plan: PrivateAutoSyncPlan
+    fileprivate let drafts: [String: WriterDraft]
+    fileprivate let assets: [String: Data]
+    fileprivate let failure: String?
+    fileprivate let hasRemoteProof: Bool
+    fileprivate let didWrite: Bool
+}
+
+private final class PrivateAutoAuthorization {
+    private let lock = NSLock()
+    private var sequence: UInt64 = 0
+    private var token: String?
+    private var working = false
+    func begin(_ token: String) -> UInt64 { lock.lock(); defer { lock.unlock() }; sequence &+= 1; self.token = token; return sequence }
+    @discardableResult func invalidate() -> UInt64 { lock.lock(); defer { lock.unlock() }; sequence &+= 1; token = nil; return sequence }
+    func permits(_ plan: PrivateAutoSyncPlan) -> Bool { lock.lock(); defer { lock.unlock() }; return token == plan.token && sequence == plan.sequence }
+    func start(_ plan: PrivateAutoSyncPlan) -> Bool { lock.lock(); defer { lock.unlock() }; guard !working, token == plan.token, sequence == plan.sequence else { return false }; working = true; return true }
+    func stop() { lock.lock(); working = false; lock.unlock() }
+    var isWorking: Bool { lock.lock(); defer { lock.unlock() }; return working }
+}
+
 private struct RepositoryArticle {
     let rawContent: String
     let blob: String
@@ -126,8 +165,9 @@ private struct GitResult {
     var errorText: String { String(data: error, encoding: .utf8) ?? "" }
 }
 
-/// All methods must be called from the same serial queue. The app owns root and
-/// its bare repository; the user's development checkout is never modified.
+/// Storage methods run on one serial queue. runPrivateAutoSync is the sole
+/// exception: it uses an immutable capture and locked authorization on a separate
+/// network worker. The user's development checkout is never modified.
 final class RepositoryStore {
     static let productionRemote = "https://github.com/Nightingalelyy/nightingalelyy.github.io.git"
     private let root: URL
@@ -136,6 +176,10 @@ final class RepositoryStore {
     private let identity: (name: String, email: String)?
     private let validation: (([String: Any]) throws -> [String: Any])?
     private let draftTransport: PrivateDraftTransport
+    private let privateAutoAuthorization = PrivateAutoAuthorization()
+    private var activePrivateAutoToken: String?
+    private var latestPrivateAutoCompletion: UInt64 = 0
+    private var lastPrivateAutoCheckedAt: String?
     private let fm = FileManager.default
     private var state = WriterState()
     private var durableState = WriterState()
@@ -175,17 +219,23 @@ final class RepositoryStore {
 
     func handle(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
         try initialize()
+        if needsRestore && method == "syncPrivateDrafts" && params["automatic"] as? Bool == true { return try bootstrap() }
         if needsRestore && !["bootstrap", "status", "listArticles", "readArticle", "listHistory", "readHistory", "readAsset", "listTemplates", "privateSyncStatus"].contains(method) {
             throw fail("Local draft storage needs recovery. Restore a valid backup before editing or publishing.")
         }
         switch method {
         case "bootstrap", "status", "listArticles", "privateSyncStatus": return try bootstrap()
         case "configurePrivateSync": return try configurePrivateSync(params)
-        case "syncPrivateDrafts": return try syncPrivateDrafts()
+        case "syncPrivateDrafts":
+            guard params["automatic"] as? Bool != true else { throw fail("Automatic private sync must use the background begin/run/finish lifecycle.") }
+            return try syncPrivateDrafts()
+        case "setPrivateAutoSync": return try setPrivateAutoSync(params)
+        case "cancelPrivateAutoSync": return try cancelPrivateAutoSync()
         case "resolvePrivateSyncConflict": return try resolvePrivateSyncConflict(params)
         case "disconnectPrivateSync":
             if var sync = state.privateSync {
-                sync.enabled = false
+                privateAutoAuthorization.invalidate(); activePrivateAutoToken = nil
+                sync.enabled = false; sync.autoSyncEnabled = false
                 sync.status = sync.conflicts.isEmpty ? "disabled" : "conflict"
                 sync.message = "Private draft sync disconnected. Local drafts, shared copies, and unresolved versions are preserved."
                 state.privateSync = sync; try persist()
@@ -304,7 +354,13 @@ final class RepositoryStore {
             state.queue.removeValue(forKey: path); state.conflicts.removeValue(forKey: path)
             state.state = "local"; state.message = "Publication canceled. Your local draft is saved."
             try persist(); return try bootstrap()
-        case "processQueue": return try processQueue()
+        case "processQueue":
+            let selected = params["path"] as? String
+            if let selected {
+                try validateArticlePath(selected)
+                guard let queued = state.queue[selected], params["expectedQueuedRevision"] as? String == digest(queued.rawContent) else { throw fail("The queued version changed. Review this article before publishing it.") }
+            }
+            return try processQueue(path: selected)
         case "resolveConflict":
             let path = try string(params, "path")
             try validateArticlePath(path)
@@ -702,7 +758,8 @@ final class RepositoryStore {
                     "base": conflict.base?.rawContent as Any? ?? NSNull(), "localRevision": local.map { digest($0.rawContent) } ?? "",
                     "remoteRevision": conflict.remoteRevision]
         }
-        var result: [String: Any] = ["enabled": sync.enabled, "state": sync.status, "message": sync.message,
+        var result: [String: Any] = ["enabled": sync.enabled, "autoSyncEnabled": sync.autoSyncEnabled ?? false,
+                                   "autoSyncInProgress": activePrivateAutoToken != nil || privateAutoAuthorization.isWorking, "state": sync.status, "message": sync.message,
                                    "conflicts": conflicts, "draftCount": state.drafts.count]
         if sync.enabled && sync.status == "synced", state.drafts.contains(where: { path, draft in
             guard let base = sync.bases[path] else { return true }
@@ -711,6 +768,7 @@ final class RepositoryStore {
             result["state"] = "ready"; result["message"] = "Local draft edits are waiting for private sync. Website publishing is separate."
         }
         if let repository = sync.repository { result["repository"] = repository }
+        if let checked = lastPrivateAutoCheckedAt { result["lastAutoCheckedAt"] = checked }
         if let time = sync.lastSyncedAt { result["lastSyncedAt"] = time }
         return result
     }
@@ -721,8 +779,9 @@ final class RepositoryStore {
         var sync = state.privateSync ?? WriterPrivateSync()
         if sync.repository?.lowercased() != repository.lowercased() {
             guard sync.conflicts.isEmpty else { throw fail("Resolve private draft conflicts before connecting a different repository.") }
-            sync = WriterPrivateSync()
+            sync = WriterPrivateSync(); lastPrivateAutoCheckedAt = nil
         }
+        privateAutoAuthorization.invalidate(); activePrivateAutoToken = nil
         try draftTransport.verify(repository: repository)
         sync.enabled = true; sync.repository = repository
         sync.status = sync.conflicts.isEmpty ? "ready" : "conflict"
@@ -919,7 +978,8 @@ final class RepositoryStore {
               (draft.baseBlob == nil) == (draft.baseContent == nil), draft.updatedAt.utf8.count <= 100 else { throw fail("A private draft has invalid publication base metadata.") }
     }
 
-    private func decodePrivatePayload(_ data: Data?) throws -> (drafts: [String: WriterDraft], assets: [String: Data]) {
+    private func decodePrivatePayload(_ data: Data?, capture: PrivateSyncCapture? = nil) throws -> (drafts: [String: WriterDraft], assets: [String: Data]) {
+        let localState = capture?.state ?? state, localArticles = capture?.articles ?? articles
         guard let data else { return ([:], [:]) }
         guard data.count <= maxPrivateSyncBytes, let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(payload.keys) == Set(["format", "formatVersion", "publicationRepository", "drafts", "assets"]),
@@ -935,7 +995,7 @@ final class RepositoryStore {
             try validatePrivateDraft(draft, path: path)
             let normalized = path.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
             guard names.insert(normalized).inserted else { throw fail("Private draft filenames collide on this Mac.") }
-            let localPaths = Set(state.drafts.keys).union(articles.keys).union(state.localRemovals?.keys.map { $0 } ?? [])
+            let localPaths = Set(localState.drafts.keys).union(localArticles.keys).union(localState.localRemovals?.keys.map { $0 } ?? [])
             guard !localPaths.contains(where: { !$0.utf8.elementsEqual(path.utf8) && $0.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) == normalized }) else {
                 throw fail("An incoming private draft filename conflicts with an existing local filename. Nothing was imported.")
             }
@@ -957,13 +1017,13 @@ final class RepositoryStore {
         for draft in drafts.values {
             for path in try privateAssetPaths(draft.rawContent) where assets[path] == nil {
                 // Already-published uploads may be supplied by the site's cached Git tree.
-                guard (try? readAsset(path: path)) != nil else { throw fail("A private draft is missing its image: \(path)") }
+                guard (try? readAsset(path: path, gitReference: capture?.commit)) != nil else { throw fail("A private draft is missing its image: \(path)") }
             }
         }
         return (drafts, assets)
     }
 
-    private func privatePayload(drafts: [String: WriterDraft], remoteAssets: [String: Data]) throws -> (data: Data, assets: [String: Data]) {
+    private func privatePayload(drafts: [String: WriterDraft], remoteAssets: [String: Data], gitReference: String? = nil) throws -> (data: Data, assets: [String: Data]) {
         guard drafts.count <= 1000 else { throw fail("Private draft sync supports up to 1000 retained drafts.") }
         var assets = remoteAssets
         var articleNames = Set<String>()
@@ -978,7 +1038,7 @@ final class RepositoryStore {
                     if let remote = assets[imagePath], remote != data { throw fail("A private image conflicts with this Mac's image. Nothing was overwritten.") }
                     assets[imagePath] = data
                 } else if assets[imagePath] == nil {
-                    let image = try readAsset(path: imagePath)
+                    let image = try readAsset(path: imagePath, gitReference: gitReference)
                     guard let encoded = image["base64"] as? String, let data = Data(base64Encoded: encoded) else { throw fail("A draft image could not be read.") }
                     try validatePrivateImage(path: imagePath, data: data); assets[imagePath] = data
                 }
@@ -999,7 +1059,210 @@ final class RepositoryStore {
         return (data, assets)
     }
 
+    private func privateSyncEqual<T: Encodable>(_ lhs: T, _ rhs: T) throws -> Bool {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(lhs) == encoder.encode(rhs)
+    }
+
+    private func checkedPrivateProtectedPaths(_ paths: [String]) throws -> Set<String> {
+        guard paths.count <= 1000 else { throw fail("Too many protected editor paths.") }
+        for path in paths { try validateArticlePath(path) }
+        return Set(paths)
+    }
+
+    private func setPrivateAutoSync(_ params: [String: Any]) throws -> [String: Any] {
+        guard let enabled = params["enabled"] as? Bool else { throw fail("Choose whether automatic private sync is enabled.") }
+        guard var sync = state.privateSync else {
+            if !enabled { return try bootstrap() }
+            throw fail("Connect private draft storage before enabling automatic sync.")
+        }
+        guard !enabled || (sync.enabled && sync.repository != nil) else { throw fail("Connect private draft storage before enabling automatic sync.") }
+        if (sync.autoSyncEnabled ?? false) != enabled {
+            privateAutoAuthorization.invalidate(); activePrivateAutoToken = nil
+            sync.autoSyncEnabled = enabled
+            state.privateSync = sync
+            try persist()
+        }
+        return try bootstrap()
+    }
+
+    /// Storage queue only. Cancellation stops a not-yet-started upload. An upload
+    /// already accepted by the provider can still be acknowledged without imports.
+    func cancelPrivateAutoSync() throws -> [String: Any] {
+        try initialize()
+        privateAutoAuthorization.invalidate(); activePrivateAutoToken = nil
+        return try bootstrap()
+    }
+
+    /// Storage queue only: capture immutable values without network or persistence.
+    func beginPrivateAutoSync(_ params: [String: Any]) throws -> PrivateAutoSyncPlan? {
+        try initialize()
+        guard !needsRestore, let sync = state.privateSync, sync.enabled, sync.autoSyncEnabled == true,
+              let repository = sync.repository, sync.conflicts.isEmpty, state.conflicts.isEmpty,
+              activePrivateAutoToken == nil, !privateAutoAuthorization.isWorking else { return nil }
+        guard let supplied = params["protectedPaths"] as? [String] else { throw fail("Automatic sync requires the current editor's protected paths.") }
+        let protected = try checkedPrivateProtectedPaths(supplied)
+        let token = UUID().uuidString.lowercased(), sequence = privateAutoAuthorization.begin(token)
+        activePrivateAutoToken = token
+        return PrivateAutoSyncPlan(token: token, sequence: sequence, repository: repository,
+            capture: PrivateSyncCapture(state: state, articles: articles, commit: cachedCommit), protectedPaths: protected)
+    }
+
+    /// Background network queue only. This reads captured values, immutable image
+    /// files/Git objects and the locked authorization ticket, never live store state.
+    func runPrivateAutoSync(_ plan: PrivateAutoSyncPlan) -> PrivateAutoSyncResult {
+        guard privateAutoAuthorization.start(plan) else {
+            return PrivateAutoSyncResult(token: plan.token, plan: plan, drafts: [:], assets: [:], failure: "Automatic private sync was cancelled.", hasRemoteProof: false, didWrite: false)
+        }
+        defer { privateAutoAuthorization.stop() }
+        var proofDrafts: [String: WriterDraft] = [:], proofAssets: [String: Data] = [:], hasProof = false
+        do {
+            let fetched = try draftTransport.read(repository: plan.repository)
+            let incoming = try decodePrivatePayload(fetched.data, capture: plan.capture)
+            proofDrafts = incoming.drafts; proofAssets = incoming.assets; hasProof = true
+            guard privateAutoAuthorization.permits(plan) else { throw fail("Automatic private sync was cancelled before uploading.") }
+            let localState = plan.capture.state
+            let sync = localState.privateSync ?? WriterPrivateSync()
+            var shared = incoming.drafts
+            for path in Set(localState.drafts.keys).union(incoming.drafts.keys).union(sync.bases.keys).sorted() {
+                let local = localState.drafts[path], base = sync.bases[path]
+                guard let remote = incoming.drafts[path] else {
+                    if let retained = local ?? base { shared[path] = retained }
+                    continue
+                }
+                let remoteID = try privateDraftIdentity(remote)
+                if let local, try privateDraftIdentity(local) == remoteID { continue }
+                if let base, try privateDraftIdentity(base) == remoteID, let local { shared[path] = local }
+                // Changed incoming versions stay in shared storage. Their optimistic
+                // local merge waits for the UI's latest protected paths at finish.
+            }
+            let outgoing = try privatePayload(drafts: shared, remoteAssets: incoming.assets, gitReference: plan.capture.commit)
+            var wrote = false
+            if outgoing.data != fetched.data {
+                _ = try draftTransport.write(repository: plan.repository, data: outgoing.data, expectedRevision: fetched.revision, beforeUpload: { [privateAutoAuthorization] in
+                    guard privateAutoAuthorization.permits(plan) else { throw RepositoryStoreError(message: "Automatic private sync was cancelled before uploading.") }
+                })
+                wrote = true
+            }
+            return PrivateAutoSyncResult(token: plan.token, plan: plan, drafts: shared, assets: outgoing.assets, failure: nil, hasRemoteProof: true, didWrite: wrote)
+        } catch {
+            return PrivateAutoSyncResult(token: plan.token, plan: plan, drafts: proofDrafts, assets: proofAssets, failure: error.localizedDescription, hasRemoteProof: hasProof, didWrite: false)
+        }
+    }
+
+    private func privateAutoResponse(_ plan: PrivateAutoSyncPlan, changed: Bool, skipped: String? = nil) throws -> [String: Any] {
+        if activePrivateAutoToken == plan.token { activePrivateAutoToken = nil; privateAutoAuthorization.invalidate() }
+        var result = try bootstrap()
+        var detail: [String: Any] = ["automatic": true, "changed": changed]
+        if let skipped { detail["skipped"] = skipped }
+        result["privateSyncResult"] = detail
+        return result
+    }
+
+    /// Storage queue only. The UI flushes saves and briefly protects its current
+    /// selection before calling this method; network time never blocks autosaves.
+    func finishPrivateAutoSync(_ result: PrivateAutoSyncResult, protectedPaths: [String]) throws -> [String: Any] {
+        try initialize()
+        let plan = result.plan
+        defer { if activePrivateAutoToken == plan.token { activePrivateAutoToken = nil; privateAutoAuthorization.invalidate() } }
+        let protected = try checkedPrivateProtectedPaths(protectedPaths)
+        guard !needsRestore, var sync = state.privateSync,
+              sync.repository?.lowercased() == plan.repository.lowercased(), plan.sequence > latestPrivateAutoCompletion else {
+            return try privateAutoResponse(plan, changed: false, skipped: "stale-or-recovery")
+        }
+        latestPrivateAutoCompletion = plan.sequence
+        let allowed = privateAutoAuthorization.permits(plan) && sync.enabled && sync.autoSyncEnabled == true && sync.conflicts.isEmpty && state.conflicts.isEmpty
+        let mayImport = allowed && result.failure == nil
+        if mayImport { lastPrivateAutoCheckedAt = now() }
+        let previous = state
+        var nextDrafts = state.drafts, archives: [(String, String, String)] = [], createdFiles: [URL] = []
+        do {
+            if mayImport {
+                // The library may have changed while the network worker ran.
+                let localPaths = Set(state.drafts.keys).union(articles.keys).union(state.localRemovals?.keys.map { $0 } ?? [])
+                for path in result.drafts.keys {
+                    let normalized = path.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+                    guard !localPaths.contains(where: { !$0.utf8.elementsEqual(path.utf8) && $0.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) == normalized }) else {
+                        throw fail("An incoming automatic draft conflicts with a filename created on this Mac. No local draft was replaced.")
+                    }
+                }
+                for (path, bytes) in result.assets where fm.fileExists(atPath: assetsRoot.appendingPathComponent(path).path) {
+                    guard try Data(contentsOf: safeExisting(path, inside: assetsRoot)) == bytes else { throw fail("An incoming private image conflicts with this Mac's image. Nothing was overwritten.") }
+                }
+            }
+            if result.hasRemoteProof {
+                for path in result.drafts.keys.sorted() {
+                    guard let remote = result.drafts[path], sync.conflicts[path] == nil else { continue }
+                    let capturedLocal = plan.capture.state.drafts[path], capturedBase = plan.capture.state.privateSync?.bases[path], local = state.drafts[path]
+                    let remoteID = try privateDraftIdentity(remote)
+                    let capturedLocalID = try capturedLocal.map { try privateDraftIdentity($0) }
+                    let capturedBaseID = try capturedBase.map { try privateDraftIdentity($0) }
+                    let localID = try local.map { try privateDraftIdentity($0) }
+                    let currentBaseID = try sync.bases[path].map { try privateDraftIdentity($0) }
+                    // A successful upload of captured A is the common base even if
+                    // autosave has since written B, or the user removed A locally.
+                    if remoteID == capturedLocalID || remoteID == localID {
+                        sync.bases[path] = remote
+                        continue
+                    }
+                    guard mayImport else { continue }
+                    if remoteID == capturedBaseID {
+                        if currentBaseID == capturedBaseID { sync.bases[path] = remote }
+                        continue
+                    }
+                    let structuralProtection = state.queue[path] != nil || state.conflicts[path] != nil || state.localRemovals?[path] != nil || state.deletionIntents?[path] != nil
+                    if local == nil, let published = articles[path], digest(published.rawContent) == digest(remote.rawContent), !structuralProtection {
+                        sync.bases[path] = remote
+                    } else if !structuralProtection && !protected.contains(path) && localID == capturedLocalID && currentBaseID == capturedBaseID &&
+                              ((capturedLocal == nil && capturedBase == nil) || capturedLocalID == capturedBaseID) {
+                        if let local { archives.append((path, local.rawContent, "before-private-auto-sync")) }
+                        nextDrafts[path] = remote; sync.bases[path] = remote
+                    } else {
+                        if sync.conflicts[path]?.remoteRevision != remoteID { archives.append((path, remote.rawContent, "private-auto-sync-conflict")) }
+                        sync.conflicts[path] = WriterPrivateSyncConflict(base: capturedBase, remote: remote, remoteRevision: remoteID)
+                    }
+                }
+            }
+            let newAssets = mayImport ? result.assets.filter { !fm.fileExists(atPath: assetsRoot.appendingPathComponent($0.key).path) } : [:]
+            let draftsChanged = try !privateSyncEqual(nextDrafts, state.drafts)
+            let metadataChanged = try !privateSyncEqual(sync, state.privateSync!)
+            let localWork = draftsChanged || !newAssets.isEmpty || !archives.isEmpty
+            if !allowed && !metadataChanged { return try privateAutoResponse(plan, changed: false, skipped: "cancelled-or-paused") }
+            if allowed, let failure = result.failure {
+                sync.status = ["offline", "network", "connection", "timed out", "resolve host"].contains(where: { failure.lowercased().contains($0) }) ? "offline" : "error"
+                sync.message = "Automatic private sync could not finish. Local writing is safe. " + failure
+                guard try !privateSyncEqual(sync, state.privateSync!) else { return try privateAutoResponse(plan, changed: false, skipped: "unchanged-error") }
+            } else if !localWork && !metadataChanged && !result.didWrite && sync.status == "synced" {
+                return try privateAutoResponse(plan, changed: false, skipped: "unchanged")
+            } else if allowed {
+                sync.status = sync.conflicts.isEmpty ? "synced" : "conflict"
+                sync.message = sync.conflicts.isEmpty ? "Private drafts synced. Website publishing remains manual." : "An incoming private draft needs review. Your current text and the other version are preserved."
+                sync.lastSyncedAt = now()
+            }
+            if localWork { try automaticBackup(force: true) }
+            for (path, bytes) in newAssets {
+                try fm.createDirectory(at: assetsRoot, withIntermediateDirectories: true)
+                let file = try safeDestination(path, inside: assetsRoot)
+                try bytes.write(to: file, options: .atomic); createdFiles.append(file)
+            }
+            for (path, raw, reason) in archives {
+                if let file = try archiveContent(path: path, content: raw, reason: reason) { createdFiles.append(file) }
+            }
+            state.drafts = nextDrafts; state.privateSync = sync
+            try persist()
+            if localWork { do { try automaticBackup(force: true) } catch { backupWarning = "Private drafts were received, but the automatic backup could not be written." } }
+            return try privateAutoResponse(plan, changed: true, skipped: allowed ? nil : "cancelled-upload-acknowledged")
+        } catch {
+            state = previous
+            for file in createdFiles { try? fm.removeItem(at: file) }
+            pendingHistoryPrunes.removeAll()
+            throw error
+        }
+    }
+
     private func syncPrivateDrafts() throws -> [String: Any] {
+        guard activePrivateAutoToken == nil && !privateAutoAuthorization.isWorking else { throw fail("A background private sync is finishing. Wait for it or cancel it before syncing manually.") }
+        latestPrivateAutoCompletion = privateAutoAuthorization.invalidate()
         guard var sync = state.privateSync, sync.enabled, let repository = sync.repository else { throw fail("Connect private draft storage before syncing.") }
         let previous = state
         var createdFiles: [URL] = []
@@ -1297,6 +1560,7 @@ final class RepositoryStore {
             }
             guard rename(temporary.path, stateFile.path) == 0 else { throw fail("Could not atomically replace local draft storage.") }
             durableState = state
+            if !state.conflicts.isEmpty || !(state.privateSync?.conflicts ?? [:]).isEmpty { privateAutoAuthorization.invalidate() }
         } catch {
             state = durableState
             throw fail("Could not save local changes to disk. Your last saved version is intact. Free disk space or check folder permissions, then retry.")
@@ -1463,6 +1727,7 @@ final class RepositoryStore {
 
     func restoreBackup(_ data: Data) throws -> [String: Any] {
         try initialize()
+        guard activePrivateAutoToken == nil && !privateAutoAuthorization.isWorking else { throw fail("Finish or cancel background private sync before restoring a backup.") }
         let (restored, histories, assets, _) = try validatedBackup(data)
         let previous = state
         let mergedLocalTemplates = try mergedTemplates(restored.templates ?? [:])
@@ -1779,11 +2044,11 @@ final class RepositoryStore {
         }
     }
 
-    private func processQueue() throws -> [String: Any] {
+    private func processQueue(path selectedPath: String? = nil) throws -> [String: Any] {
         guard !state.queue.isEmpty else { return try bootstrap() }
         do { try fetch() } catch { networkFailure(error); try persist(); return try bootstrap() }
         var published = 0
-        for path in state.queue.keys.sorted() {
+        for path in selectedPath.map({ [$0] }) ?? state.queue.keys.sorted() {
             guard let snapshot = state.queue[path] else { continue }
             if state.privateSync?.conflicts[path] != nil {
                 state.state = "conflict"; state.message = "Resolve the private draft conflict before publishing this article."
@@ -1941,7 +2206,7 @@ final class RepositoryStore {
         return ["path": "/" + path, "mime": mime, "base64": data.base64EncodedString()]
     }
 
-    private func readAsset(path supplied: String) throws -> [String: Any] {
+    private func readAsset(path supplied: String, gitReference: String? = nil) throws -> [String: Any] {
         let path = supplied.hasPrefix("/") ? String(supplied.dropFirst()) : supplied
         try validateRelative(path)
         guard path.hasPrefix("images/") || ["siteicon.png", "apple-touch-icon.png", "touch-icon.png"].contains(path), let mime = imageMIME((path as NSString).pathExtension) else { throw fail("Only repository image assets can be previewed.") }
@@ -1949,9 +2214,10 @@ final class RepositoryStore {
         if fm.fileExists(atPath: assetsRoot.appendingPathComponent(path).path) {
             data = try Data(contentsOf: safeExisting(path, inside: assetsRoot))
         } else {
-            let tree = try git(["ls-tree", remoteRef, "--", path], at: repository).text
+            let reference = gitReference ?? remoteRef
+            let tree = try git(["ls-tree", reference, "--", path], at: repository).text
             guard tree.hasPrefix("100644 blob ") || tree.hasPrefix("100755 blob ") else { throw fail("The image was not found in the repository.") }
-            data = try git(["show", "\(remoteRef):\(path)"], at: repository).output
+            data = try git(["show", "\(reference):\(path)"], at: repository).output
         }
         guard data.count <= 20 * 1024 * 1024 else { throw fail("The image is too large to preview.") }
         return ["path": "/" + path, "mime": mime, "base64": data.base64EncodedString()]

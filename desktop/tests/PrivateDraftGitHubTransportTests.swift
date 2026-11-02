@@ -253,6 +253,18 @@ private final class FakePrivateGitHub {
             try rejects("Visibility changed during preparation but upload proceeded") { _ = try transport.write(repository: repository, data: privateBytes, expectedRevision: FakePrivateGitHub.old) }
             try expect(fake.pushes.isEmpty, "Last privacy check must block the upload")
         }
+        do {
+            let (fake, transport) = fixture()
+            var authorized = true
+            fake.afterCommit = { authorized = false }
+            try rejects("Disabling automatic sync during preparation must cancel the upload") {
+                _ = try transport.write(repository: repository, data: privateBytes, expectedRevision: FakePrivateGitHub.old, beforeUpload: {
+                    guard authorized else { throw PrivateDraftTransportError(message: "Automatic sync disabled") }
+                })
+            }
+            try expect(fake.pushes.isEmpty && fake.remoteHead == FakePrivateGitHub.old, "The late authorization gate must prevent every push")
+            try expect(fake.calls.filter { $0.command == "api" && $0.arguments.last == "user" }.count == 2, "The cancellation gate must run after the final privacy verification")
+        }
         for failure in ["fetch", "hash-object", "mktree", "commit-tree", "push"] {
             let (fake, transport) = fixture(); fake.failureCommand = failure
             try rejects("Command failure accepted") { _ = try transport.write(repository: repository, data: privateBytes, expectedRevision: FakePrivateGitHub.old) }

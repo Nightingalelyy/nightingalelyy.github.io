@@ -20,6 +20,20 @@ test('publication states distinguish local edits from the exact uploaded version
   assert.equal(publicationView(item).label, 'On GitHub');
 });
 
+test('queued publication always requires an explicit retry and keeps later edits local', () => {
+  const queued = { path: '_docs/a.md', revision: 'latest-local', isDraft: true, isQueued: true };
+  for (const item of [queued, { ...queued, publication: { status: 'unknown', sourceSHA256: 'old', message: 'Retrying automatically when connected.' } }]) {
+    const view = publicationView(item);
+    assert.equal(view.label, 'Queued');
+    assert.match(view.message, /Choose Retry queued version to publish/);
+    assert.match(view.message, /Later edits remain local/);
+    assert.doesNotMatch(view.message, /automatically|when connected|retrying/i);
+    const editing = publicationView(item, { dirty: true });
+    assert.equal(editing.label, 'Editing');
+    assert.match(editing.message, /Later edits remain local/);
+  }
+});
+
 test('a stale publication poll cannot replace draft content, revision, queue or selection state', () => {
   const article = { path: '_docs/a.md', rawContent: 'new local text', revision: 'new', isDraft: true, isQueued: false, selected: true };
   const untouched = { path: '_docs/b.md', rawContent: 'other text', revision: 'other' };

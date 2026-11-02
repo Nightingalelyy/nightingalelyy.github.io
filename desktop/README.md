@@ -22,15 +22,16 @@ show a file and line number; the draft remains on this Mac until they are fixed.
 The same checks run on GitHub for changes made through Pages CMS.
 
 Publishing queues the selected version. If GitHub cannot be reached, the queue
-stays on disk and retries while the app is open. Later edits remain local until
-you choose Publish again. The app does not run a background service when closed.
+stays on disk until you choose **Retry queued version** for that article. Later
+edits remain local until you choose Publish again. Reconnecting never publishes
+queued work. The app does not run a background service when closed.
 The article progresses through **Queued**, **Uploaded**, **Building**, and
 **Live**. **Failed** links to the build details. Live is confirmed by the deployed
 website's source hash, including when a newer site build still contains the same
 article. New edits remain a local draft while an earlier version is building.
 If status cannot be refreshed, the app preserves the last verified time.
 
-**Refresh** downloads changes made through Pages CMS. If the same article changed
+**Website sync** downloads changes made through Pages CMS. If the same article changed
 online and locally, publication stops for review. The app retains the base,
 queued, and remote versions. Save a resolution locally, then choose Publish.
 It never force-pushes.
@@ -102,15 +103,24 @@ images, and download work from another Mac. Use the same repository and GitHub
 CLI account on your other Mac. GitHub CLI must be installed and signed in as
 `Nightingalelyy`; the app never stores a token in draft data or its bundle.
 
-Private draft sync has its own button. **Website sync** retains the existing
-download/publish-queue behavior. **Publish** remains the action that queues an
+Private draft sync has its own button. **Website sync** only downloads website
+changes. **Publish** remains the action that queues and uploads an
 article for the public website and makes it available through Pages CMS.
 Private sync never copies publishing queues, deletion actions, credentials,
 history, or app settings to another Mac. It includes the unpublished images
 referenced by the shared drafts.
 
-Sync is manual in this version. Offline editing continues normally; choose
-**Sync drafts** again when connected. If both Macs changed a draft, the panel
+Enable **Sync private drafts automatically while this app is open** in the private
+sync panel to send saved changes after eight seconds of inactivity, check for
+incoming changes every two minutes, and retry when the network returns. Each Mac
+has its own setting, initially off. Offline editing and local autosave continue
+normally. Failed transfers retry with increasing delays, up to five minutes;
+the panel shows connection and retry status. Closing the app stops these checks.
+You can still choose **Sync drafts** manually.
+
+Automatic sync preserves the active editor and pauses for conflicts, recovery,
+and dialogs. Changes arriving during a transfer cannot replace newer local edits.
+If both Macs changed a draft, the panel
 shows both versions and lets you keep this Mac's version or use the other one.
 The displaced version remains in local history. Review and publish separately.
 Publishing is blocked while that article has an unresolved private-sync conflict.
@@ -311,6 +321,7 @@ discovery, and private draft sync between Macs.
 
 Maintenance and distribution now add versioned signed releases, explicit verified
 updates and rollback, automated preview-versus-website checks, and build/media/
-performance reports. Private draft sync remains manual; a second physical Mac
+performance reports. Private draft sync can now run automatically while the app
+is open, while publishing stays manual. A second physical Mac
 still needs its own setup and acceptance check. Apple notarization remains
 dependent on a Developer ID account.
