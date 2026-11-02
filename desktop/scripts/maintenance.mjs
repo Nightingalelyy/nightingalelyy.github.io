@@ -209,7 +209,7 @@ function highlightBlocks(blocks) {
       if (batch.length && bytes + size > 512 * 1024) break;
       batch.push(block); bytes += size; position++;
     }
-    const result = JSON.parse(execFileSync('/usr/bin/ruby', ['--disable-gems', '-EUTF-8:UTF-8', path.join(desktop, 'preview/highlight.rb')], { input: JSON.stringify({ blocks: batch }), env: cleanEnvironment, maxBuffer: 9 * 1024 * 1024, timeout: 30_000, encoding: 'utf8' }));
+    const result = JSON.parse(execFileSync(process.env.WRITER_MAINTENANCE_RUBY || 'ruby', ['-EUTF-8:UTF-8', path.join(desktop, 'preview/highlight.rb')], { input: JSON.stringify({ blocks: batch }), env: cleanEnvironment, maxBuffer: 9 * 1024 * 1024, timeout: 30_000, encoding: 'utf8' }));
     if (result.version !== '3.30.0' || result.blocks?.length !== batch.length) throw new Error('Unexpected desktop highlighting response.');
     results.push(...result.blocks);
   }

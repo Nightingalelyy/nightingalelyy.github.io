@@ -285,6 +285,8 @@ and successful desktop CI for that commit. It never overwrites an existing versi
 Release assets include the versioned ZIP, signed manifest, checksums, and reports.
 The app trusts only the bundled public key; the private release key stays outside
 the repository and should be backed up to a separate private location.
+On the release Mac, the key is stored at
+`~/Library/Application Support/Nightingale Writer Release/signing-key.bin`.
 
 The integration tests use temporary local Git remotes. They cover persisted
 offline drafts, exact queued publication snapshots, conflict handling, image
