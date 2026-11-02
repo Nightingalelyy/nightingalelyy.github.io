@@ -1,6 +1,7 @@
 import AppKit
 import WebKit
 import UniformTypeIdentifiers
+import Darwin
 
 private let bridgeScript = """
 (() => {
@@ -29,6 +30,8 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     private var store: RepositoryStore!
     private var codeHighlighter: CodeHighlighter!
     private var publishingValidator: PublishingValidator!
+    private var updateManager: UpdateManager!
+    private let updateWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.updates")
     private let deploymentClient = DeploymentClient()
     private let deploymentWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.deployment")
     private var pendingBackup: (token: String, data: Data)?
@@ -36,12 +39,14 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     private let highlightWorker = DispatchQueue(label: "io.github.nightingalelyy.writer.highlight", qos: .userInitiated)
     private var allowClose = false
     private var closing = false
+    private var updateHandoffInProgress = false
     private var webRoot: URL!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let root = support.appendingPathComponent("Nightingale Writer", isDirectory: true)
+        updateManager = UpdateManager(resources: Bundle.main.resourceURL!, appURL: Bundle.main.bundleURL, dataRoot: root)
         let seed = Bundle.main.resourceURL?.appendingPathComponent("Seed.git", isDirectory: true)
         publishingValidator = PublishingValidator(resources: Bundle.main.resourceURL!)
         store = RepositoryStore(root: root, seedRepo: seed, validation: { [weak self] payload in
@@ -99,6 +104,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         pasteImage.keyEquivalentModifierMask = [.command, .shift]
         let editItem = NSMenuItem(); editItem.submenu = edit; bar.addItem(editItem)
         let help = NSMenu(title: "Help")
+        help.addItem(withTitle: "Updates & Diagnostics", action: #selector(showUpdates), keyEquivalent: "")
         help.addItem(withTitle: "Open Pages CMS", action: #selector(openCMS), keyEquivalent: "")
         help.addItem(withTitle: "Open Website", action: #selector(openSite), keyEquivalent: "")
         help.addItem(withTitle: "Show Local Data", action: #selector(showData), keyEquivalent: "")
@@ -107,6 +113,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
     }
 
     @objc private func showAbout() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Nightingale Writer", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", .credits: NSAttributedString(string: "Write offline. Publish when you're ready.")]) }
+    @objc private func showUpdates() { webView.evaluateJavaScript("window.writer?.showUpdates?.()") }
     @objc private func newArticle() { webView.evaluateJavaScript("window.writer?.newArticle?.()") }
     @objc private func saveArticle() { webView.evaluateJavaScript("window.writer?.saveCurrent?.()") }
     @objc private func refreshArticles() { webView.evaluateJavaScript("window.writer?.refresh?.()") }
@@ -124,6 +131,17 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
               let body = message.body as? [String: Any], let id = body["id"] as? String,
               let method = body["method"] as? String else { return }
         let params = body["params"] as? [String: Any] ?? [:]
+        if ["getUpdateStatus", "checkForUpdates", "downloadUpdate"].contains(method) {
+            updateWorker.async { [weak self] in
+                guard let self else { return }
+                do { let result = try self.updateManager.handle(method: method, params: params); DispatchQueue.main.async { self.respond(id, result: result) } }
+                catch { DispatchQueue.main.async { self.respond(id, error: error.localizedDescription) } }
+            }
+            return
+        }
+        if method == "installUpdate" || method == "rollbackUpdate" { beginUpdate(id: id, rollback: method == "rollbackUpdate", params: params); return }
+        if method == "getDiagnosticsReport" { respond(id, result: diagnosticsReport()); return }
+        if method == "exportDiagnosticsReport" { exportDiagnosticsReport(id: id); return }
         if method == "chooseImage" { chooseImage(id: id, optimize: params["optimize"] as? Bool ?? true); return }
         if method == "pasteImage" {
             let pasteboard = NSPasteboard.general
@@ -165,7 +183,7 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         if method == "pollPublicationStatus" { pollPublicationStatus(id: id); return }
         if method == "openExternal" {
             guard let raw = params["url"] as? String, let url = URL(string: raw), url.scheme == "https", url.user == nil, url.password == nil,
-                  url.host == "nightingalelyy.github.io" || (url.host == "github.com" && url.path.lowercased().hasPrefix("/nightingalelyy/nightingalelyy.github.io/actions/")) else { respond(id, error: "This is not a website or build link."); return }
+                  url.host == "nightingalelyy.github.io" || (url.host == "github.com" && ["/nightingalelyy/nightingalelyy.github.io/actions/", "/nightingalelyy/nightingalelyy.github.io/releases/"].contains(where: { url.path.lowercased().hasPrefix($0) })) else { respond(id, error: "This is not a website, release, or build link."); return }
             NSWorkspace.shared.open(url); respond(id, result: [:]); return
         }
         if method == "highlightCode" {
@@ -191,6 +209,97 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
                 let text = error.localizedDescription
                 DispatchQueue.main.async { self.respond(id, error: text) }
             }
+        }
+    }
+
+    private func beginUpdate(id: String, rollback: Bool, params: [String: Any]) {
+        guard !updateHandoffInProgress else { respond(id, error: "An app restart is already being prepared."); return }
+        guard let token = params["token"] as? String, params["confirmation"] as? String == (rollback ? "ROLLBACK" : "INSTALL") else {
+            respond(id, error: "Review and confirm the prepared app version first."); return
+        }
+        updateHandoffInProgress = true
+        flushBeforeClose { [weak self] saved in
+            guard let self else { return }
+            self.allowClose = false
+            guard saved else { self.updateHandoffInProgress = false; self.respond(id, error: "Save your writing before restarting."); return }
+            self.worker.async {
+                do {
+                    let snapshot = try self.store.handle(method: "bootstrap")
+                    guard (snapshot["status"] as? [String: Any])?["queuedCount"] as? Int == 0,
+                          (snapshot["recovery"] as? [String: Any])?["needsRestore"] as? Bool != true else {
+                        throw NSError(domain: "WriterUpdate", code: 1, userInfo: [NSLocalizedDescriptionKey: "Finish or cancel queued publications and recover local storage before restarting for an update."])
+                    }
+                    let checkpoint = try self.store.exportBackup()
+                    self.updateWorker.async {
+                        do {
+                            let handoff = rollback ? try self.updateManager.prepareRollback(token: token, backup: checkpoint, parentPID: ProcessInfo.processInfo.processIdentifier) : try self.updateManager.prepareInstall(token: token, backup: checkpoint, parentPID: ProcessInfo.processInfo.processIdentifier)
+                            let helper = Process(); helper.executableURL = handoff.helperURL; helper.arguments = ["--apply-plan", handoff.planURL.path]
+                            helper.standardInput = FileHandle.nullDevice; helper.standardOutput = FileHandle.nullDevice; helper.standardError = FileHandle.nullDevice
+                            let helperExited = DispatchSemaphore(value: 0)
+                            helper.terminationHandler = { _ in helperExited.signal() }
+                            var launchedHelperPID: Int32?
+                            do {
+                                try helper.run()
+                                launchedHelperPID = helper.processIdentifier
+                                try self.updateManager.waitForHelperReady(handoff, helperPID: helper.processIdentifier)
+                            } catch {
+                                if helper.isRunning {
+                                    helper.terminate()
+                                    if helperExited.wait(timeout: .now() + 2) == .timedOut {
+                                        kill(helper.processIdentifier, SIGKILL)
+                                        _ = helperExited.wait(timeout: .now() + 2)
+                                    }
+                                }
+                                guard !helper.isRunning else {
+                                    DispatchQueue.main.async { self.respond(id, error: "The installer is still stopping. Keep this app open; no further restart is allowed until it exits.") }
+                                    return
+                                }
+                                try? self.updateManager.cancelHandoff(handoff, helperPID: launchedHelperPID)
+                                throw error
+                            }
+                            DispatchQueue.main.async { self.respond(id, result: handoff.status); self.allowClose = true; NSApp.terminate(nil) }
+                        } catch { DispatchQueue.main.async { self.updateHandoffInProgress = false; self.allowClose = false; self.respond(id, error: error.localizedDescription) } }
+                    }
+                } catch { DispatchQueue.main.async { self.updateHandoffInProgress = false; self.allowClose = false; self.respond(id, error: error.localizedDescription) } }
+            }
+        }
+    }
+
+    private func diagnosticsReport() -> [String: Any] {
+        func report(_ name: String) -> [String: Any] {
+            guard let url = Bundle.main.resourceURL?.appendingPathComponent(name),
+                  let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 2 * 1024 * 1024,
+                  let data = try? Data(contentsOf: url), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            return object
+        }
+        func metric(_ label: String, _ value: Any?, _ unit: String = "") -> [String: Any] {
+            if unit == "ms", let number = value as? NSNumber {
+                return ["label": label, "value": (number.doubleValue * 100).rounded() / 100, "unit": unit]
+            }
+            return ["label": label, "value": value ?? NSNull(), "unit": unit]
+        }
+        let build = report("build-report.json"), maintenance = report("maintenance-report.json")
+        let corpus = maintenance["corpus"] as? [String: Any] ?? [:], assets = maintenance["assets"] as? [String: Any] ?? [:]
+        let timings = maintenance["timings"] as? [String: Any] ?? [:], parity = maintenance["parity"] as? [String: Any] ?? [:]
+        let sections: [[String: Any]] = [
+            ["id": "build", "title": "App build", "state": build.isEmpty ? "unavailable" : "ok", "summary": "Measured while this release was built.", "metrics": [metric("Version", build["version"]), metric("Build time", build["appBuildMeasuredMS"], "ms"), metric("Bundle before signing", build["bundleBytesBeforeSigning"], "bytes")]],
+            ["id": "integrity", "title": "Preview and website checks", "state": maintenance["ok"] as? Bool == true ? "ok" : "unavailable", "summary": "Content, code, highlighting, shared styles, and fonts. Documented typography and automatic-link differences are listed in the exported report; this is not a pixel comparison.", "metrics": [metric("Documents", corpus["documents"]), metric("Code blocks", corpus["codeBlocks"]), metric("Known rendering differences", (parity["knownDifferences"] as? [Any])?.count), metric("Website build", timings["websiteBuildMeasuredMS"], "ms")]],
+            ["id": "media", "title": "Media and search index", "state": assets.isEmpty ? "unavailable" : "ok", "summary": "Repository-hosted media and bundled preview resources. External image sizes are not measured.", "metrics": [metric("Website media", assets["mediaBytes"], "bytes"), metric("Media files", assets["mediaFiles"]), metric("Preview assets", assets["previewBytes"], "bytes"), metric("Search index", assets["searchIndexBytes"], "bytes")]],
+            ["id": "performance", "title": "Repeatable performance checks", "state": timings.isEmpty ? "unavailable" : "ok", "summary": "Measured on a fixed benchmark dataset during the build; these are not live typing measurements. Search timing covers a batch of five queries.", "metrics": [metric("Preview p95", (timings["preview"] as? [String: Any])?["p95MS"], "ms"), metric("Search batch p95", (timings["search"] as? [String: Any])?["p95MS"], "ms"), metric("Search benchmark articles", (timings["search"] as? [String: Any])?["articles"])]],
+        ]
+        return ["generatedAt": maintenance["generatedAt"] ?? build["builtAt"] ?? "", "sections": sections, "exportAvailable": true, "build": build, "maintenance": maintenance]
+    }
+
+    private func exportDiagnosticsReport(id: String) {
+        let panel = NSSavePanel(); panel.title = "Export Build and Performance Report"; panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Nightingale Writer Diagnostics.json"
+        panel.message = "Contains public-source build measurements. Drafts, credentials, and local writing are excluded."
+        let report = diagnosticsReport()
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            guard response == .OK, let url = panel.url else { self.respond(id, result: ["cancelled": true]); return }
+            do { try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic); self.respond(id, result: ["fileName": url.lastPathComponent]) }
+            catch { self.respond(id, error: error.localizedDescription) }
         }
     }
 
@@ -341,11 +450,13 @@ final class WriterDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if allowClose { return true }
+        if updateHandoffInProgress { return false }
         flushBeforeClose { if $0 { sender.close() } }
         return false
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if allowClose { return .terminateNow }
+        if updateHandoffInProgress { return .terminateCancel }
         flushBeforeClose { sender.reply(toApplicationShouldTerminate: $0) }
         return .terminateLater
     }

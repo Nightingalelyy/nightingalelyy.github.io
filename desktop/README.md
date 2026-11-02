@@ -131,6 +131,39 @@ Snapshots are limited to 64 MB, with at most 1,000 drafts and 1,000 images,
 5 MB per article and 20 MB per image. Oversized or invalid data is rejected
 without replacing local writing.
 
+## App updates and diagnostics
+
+Open **Updates & diagnostics** in the sidebar or Help menu. **Check for updates**
+contacts this project's GitHub releases. **Prepare update** downloads and verifies
+the signed release manifest, archive checksum, app identity, version, and package.
+**Restart and install** requires a separate confirmation. Finish or cancel queued
+publications first. The app saves writing and creates a private recovery checkpoint
+before replacing the app bundle. The updater retains the previous verified app;
+**Restore previous version** performs an explicit rollback without reverting
+current drafts. An update never publishes articles or changes draft-sync settings.
+
+Updates and diagnostics are manual. No scheduled download, installation, or
+diagnostics upload runs in the background. **Load local report** shows the checks
+and measurements bundled with this release; **Export report** saves that report
+to a file you choose. Reports contain public-source build results, not local drafts,
+credentials, or writing history.
+
+The maintenance checks compare every published article's content, exact code and
+Rouge tokens, authored links, images, semantic structure, shared styles, and font
+provenance. Prose smart punctuation and additional bare-URL autolinks are reported
+as known renderer differences. This is an integrity check, not a pixel comparison.
+Numbered Markdown lists now start the same way in the preview and Jekyll.
+
+Reports record website/app build time, repository-hosted media size, preview/font
+and search-index size, and repeatable preview/search timings. External image sizes
+are not measured. Benchmarks include their dataset hashes, repetitions, tool
+versions, hardware context, and regression budgets; they do not measure live typing.
+
+This personal app uses ad-hoc macOS signing and a pinned Ed25519 release key.
+Apple notarization requires a Developer ID identity and account; none is configured
+for this project. The updater does not remove quarantine or bypass Gatekeeper.
+Version 0.5 and earlier need one manual installation of 0.6 to gain these controls.
+
 ## History and backups
 
 Choose **Delete…** to remove the selected article or editable page. There are two
@@ -224,6 +257,35 @@ The build bundles the website's local `main` branch as an offline seed. Frontend
 libraries are bundled locally. The app is signed ad hoc for local use; it is not
 an Apple-notarized public distribution.
 
+For a measured release candidate, build the safe Jekyll site and maintenance report
+before the app, from the same clean source commit:
+
+```sh
+bundle exec node desktop/scripts/maintenance.mjs --build-site
+cd desktop
+npm run build
+```
+
+GitHub's **Check desktop app** workflow runs the tests, corpus regression checks,
+benchmarks, and Apple Silicon build on every desktop push. It retains reports and
+candidate archives without receiving signing credentials or publishing permissions.
+Every build also passes its real ZIP through the updater's extractor and checks
+that the extracted bundle's signature and file fingerprint match the built app.
+
+After that workflow passes for the exact commit, the owner prepares and publishes
+a release locally:
+
+```sh
+npm run release:prepare -- --key /private/path/signing-key.bin --ci-run RUN_ID --publish
+```
+
+Omit `--publish` to prepare the archive and signed manifest for inspection only.
+The command requires a clean source tree, matching reports, the pinned signing key,
+and successful desktop CI for that commit. It never overwrites an existing version.
+Release assets include the versioned ZIP, signed manifest, checksums, and reports.
+The app trusts only the bundled public key; the private release key stays outside
+the repository and should be backed up to a separate private location.
+
 The integration tests use temporary local Git remotes. They cover persisted
 offline drafts, exact queued publication snapshots, conflict handling, image
 staging, path restrictions, and unrelated-file preservation. They never publish
@@ -245,6 +307,8 @@ The completed milestones cover publishing checks and deployment status, draft
 recovery and backups, writing tools and content management, public-site
 discovery, and private draft sync between Macs.
 
-Next is maintenance and distribution: versioned Mac releases, safe updates with
-rollback, automated preview-versus-website checks, and measurements for build
-time, media size, and editor/search performance.
+Maintenance and distribution now add versioned signed releases, explicit verified
+updates and rollback, automated preview-versus-website checks, and build/media/
+performance reports. Private draft sync remains manual; a second physical Mac
+still needs its own setup and acceptance check. Apple notarization remains
+dependent on a Developer ID account.

@@ -3,6 +3,14 @@ import MarkdownIt from 'markdown-it';
 // Match the site's GFM hard_wrap setting: Enter is a visible line break.
 const renderer = new MarkdownIt({ html: true, linkify: true, breaks: true });
 
+// Kramdown GFM starts Markdown ordered lists at 1 even when the first source
+// marker is a problem number. Raw HTML <ol start="…"> remains unchanged.
+renderer.renderer.rules.ordered_list_open = (tokens, index, options, environment, self) => {
+  const token = tokens[index];
+  if (token.attrs) token.attrs = token.attrs.filter(([name]) => name !== 'start');
+  return self.renderToken(tokens, index, options);
+};
+
 function codeBlock(token, environment) {
   // Rouge's Jekyll wrapper uses the base language in its CSS class while
   // find_fancy receives options such as c++?linenums unchanged.

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-execFileSync(process.execPath, ['--test', 'web/content.test.js', 'web/markdown.test.js', 'web/workflow.test.js', 'web/writing-tools.test.js', 'web/management.test.js', 'web/private-sync.test.js', 'tests/site-preview.test.mjs'], {cwd: root, stdio: 'inherit'});
+execFileSync(process.execPath, ['--test', 'web/content.test.js', 'web/markdown.test.js', 'web/workflow.test.js', 'web/writing-tools.test.js', 'web/management.test.js', 'web/private-sync.test.js', 'web/updates.test.js', 'tests/site-preview.test.mjs', 'tests/maintenance.test.mjs'], {cwd: root, stdio: 'inherit'});
 const buildDir = path.join(root, '.build');
 fs.mkdirSync(path.join(buildDir, 'module-cache'), { recursive: true });
 const binary = path.join(buildDir, 'repository-tests');
@@ -32,3 +32,7 @@ execFileSync(validatorTests, [path.dirname(root)], {cwd: root, stdio: 'inherit'}
 const mediaTests = path.join(buildDir, 'media-tests');
 execFileSync('/usr/bin/swiftc', ['-swift-version', '5', '-module-cache-path', path.join(buildDir, 'module-cache'), 'native/MediaProcessor.swift', 'tests/MediaProcessorTests.swift', '-o', mediaTests], {cwd: root, stdio: 'inherit'});
 execFileSync(mediaTests, [], {cwd: root, stdio: 'inherit'});
+
+const updateTests = path.join(buildDir, 'update-tests');
+execFileSync('/usr/bin/swiftc', ['-swift-version', '5', '-parse-as-library', '-module-cache-path', path.join(buildDir, 'module-cache'), 'native/UpdateManager.swift', 'native/UpdateInstaller.swift', 'tests/UpdateManagerTests.swift', '-framework', 'AppKit', '-o', updateTests], {cwd: root, stdio: 'inherit'});
+execFileSync(updateTests, [], {cwd: root, stdio: 'inherit'});

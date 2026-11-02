@@ -24,6 +24,19 @@ test('lists, code blocks and inline HTML keep their structure', () => {
   assert.equal(renderMarkdown('10<sup>5</sup>\nNext line\n'), '<p>10<sup>5</sup><br>\nNext line</p>\n');
 });
 
+test('Markdown ordered lists match Kramdown starts while explicit HTML retains its start', () => {
+  for (const start of [0, 7, 290, 605, 961]) {
+    const html = renderMarkdown(`${start}. First\n${start + 1}. Second\n`);
+    assert.match(html, /^<ol>/);
+    assert.equal((html.match(/<li>/g) || []).length, 2);
+    assert.doesNotMatch(html, /\bstart=/);
+  }
+  const nested = renderMarkdown('7. Outer\n\n   4. Inner\n   5. Inner two\n');
+  assert.equal((nested.match(/<ol>/g) || []).length, 2);
+  assert.doesNotMatch(nested, /\bstart=/);
+  assert.equal(renderMarkdown('<ol start="7"><li>Explicit HTML</li></ol>\n'), '<ol start="7"><li>Explicit HTML</li></ol>\n');
+});
+
 test('fenced code uses the live Jekyll wrapper and keeps literal whitespace', () => {
   const source = '```c++\n\tint value = 1;  \n\n    return value;\n```\n';
   const result = renderMarkdownPreview(source, 'test-render');

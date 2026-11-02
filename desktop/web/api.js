@@ -50,4 +50,11 @@ export const api = {
   syncPrivateDrafts: () => call('syncPrivateDrafts'),
   disconnectPrivateSync: () => call('disconnectPrivateSync'),
   resolvePrivateSyncConflict: (params) => call('resolvePrivateSyncConflict', params),
+  getUpdateStatus: () => call('getUpdateStatus'),
+  checkForUpdates: () => call('checkForUpdates'),
+  downloadUpdate: (version, build) => call('downloadUpdate', { version, build }),
+  installUpdate: (token) => call('installUpdate', { token, confirmation: 'INSTALL' }),
+  rollbackUpdate: (token) => call('rollbackUpdate', { token, confirmation: 'ROLLBACK' }),
+  getDiagnosticsReport: () => call('getDiagnosticsReport'),
+  exportDiagnosticsReport: () => call('exportDiagnosticsReport'),
 };

@@ -11,6 +11,7 @@ import { publicationView, mergePublicationRecords, validationSummary, issueLocat
 import { installWritingTools } from './writing-tools.js';
 import { installManagement } from './management.js';
 import { installPrivateSync } from './private-sync.js';
+import { installUpdates } from './updates.js';
 
 const $ = (selector) => document.querySelector(selector);
 const icons = {
@@ -55,6 +56,7 @@ let editor;
 let writingTools;
 let management;
 let privateSync;
+let updates;
 let mediaBusy = false;
 let autosaveTimer;
 let previewTimer;
@@ -161,6 +163,7 @@ function applyWorkspaceAccess() {
   editor?.dispatch({ effects: editable.reconfigure([EditorView.editable.of(!readOnly), EditorState.readOnly.of(readOnly)]) });
   writingTools?.refresh();
   privateSync?.refresh();
+  updates?.refresh();
   for (const id of ['manage-categories-button', 'templates-button', 'paste-image-button']) $(`#${id}`).disabled = readOnly || state.busy || state.publishing || !state.ready;
 }
 function applyPublicationSnapshot(snapshot) {
@@ -1436,8 +1439,8 @@ window.addEventListener('online', () => { if (state.articles.some((item) => item
 setInterval(() => { if (state.ready && state.articles.some((item) => item.isQueued && !item.conflict)) runSync({ quiet: true, publish: true }); }, 30000);
 setInterval(() => { void pollPublications(); }, 15000);
 window.writer = {
-  async flushBeforeClose() { if (recovery.busy || removal.busy || mediaBusy || management?.isBusy() || privateSync?.isBusy()) throw new Error('Wait for the current operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
-  newArticle, saveCurrent, pasteImage, refresh: () => runSync(), publishCurrent, showHistory: () => openHistory(state.active?.path), showAllHistory: () => openHistory(), showBackups: openBackups,
+  async flushBeforeClose() { if (recovery.busy || removal.busy || mediaBusy || management?.isBusy() || privateSync?.isBusy() || updates?.isBusy() && !updates?.isHandingOff()) throw new Error('Wait for the current operation to finish before quitting.'); setTransition(true); try { await saveCurrent(); return true; } catch (error) { setTransition(false); showError(error); throw error; } },
+  newArticle, saveCurrent, pasteImage, refresh: () => runSync(), publishCurrent, showHistory: () => openHistory(state.active?.path), showAllHistory: () => openHistory(), showBackups: openBackups, showUpdates: () => updates?.open(),
 };
 management = installManagement({ api, getSnapshot: () => ({ articles: state.articles, categories: state.categories, active: state.active }), saveActive: saveCurrent, applySnapshot, selectArticle,
   onError: showError, onToast: showToast, canEdit: () => state.ready && !state.recoveryMode && !state.busy && !state.transitioning && !state.publishing && !mediaBusy });
@@ -1456,5 +1459,11 @@ privateSync = installPrivateSync({ api, getSnapshot: () => ({ active: state.acti
   setLocked: setTransition,
   canUse: () => state.ready && !state.recoveryMode && !state.busy && !state.transitioning && !state.publishing && !mediaBusy && !removal.busy && !management?.isBusy(),
   onError: showError, onToast: showToast,
+});
+updates = installUpdates({ api, saveActive: saveCurrent, setLocked: setTransition,
+  canOpen: () => !state.busy && !state.transitioning && !state.publishing && !mediaBusy && !removal.busy && !recovery.busy && !management?.isBusy() && !privateSync?.isBusy(),
+  getContext: () => ({ ready: state.ready, recoveryMode: state.recoveryMode, queuedCount: state.articles.filter((article) => article.isQueued).length,
+    busy: state.busy || state.publishing || mediaBusy || removal.busy || recovery.busy || Boolean(management?.isBusy()) || Boolean(privateSync?.isBusy()) || (state.transitioning && !updates?.isBusy()),
+  }), onError: showError, onToast: showToast,
 });
 bootstrap();
