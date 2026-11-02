@@ -1,0 +1,86 @@
+name: Check desktop app
+
+on:
+  push:
+    branches: [main, desktop/mac-app, 'codex/**']
+    tags: ['writer-v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Test and build Apple Silicon app
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Load desktop checks for website-only branches
+        if: hashFiles('desktop/package.json') == ''
+        run: |
+          # Public, fixed owner repository; no stored GitHub credentials or secrets.
+          # Restore only desktop tools. Keep this checkout's website and HEAD intact.
+          git fetch --no-tags https://github.com/Nightingalelyy/nightingalelyy.github.io.git refs/heads/desktop/mac-app
+          git restore --source=FETCH_HEAD --worktree -- desktop
+          # The mixed source tree is intentionally dirty. Release preparation rejects
+          # its provenance, even when these website/preview compatibility checks pass.
+          test -f desktop/package.json
+      - name: Prepare public website seed
+        run: |
+          test "$(uname -m)" = arm64
+          git show-ref --verify refs/heads/main >/dev/null || git branch main refs/remotes/origin/main
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install locked desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Run desktop tests
+        working-directory: desktop
+        run: npm test
+      - name: Set up production Ruby renderer
+        uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1
+        with:
+          ruby-version: '3.3'
+          bundler: '2.4.22'
+          bundler-cache: true
+      - name: Build website and verify preview integrity and performance
+        env:
+          JEKYLL_ENV: production
+        run: bundle exec node desktop/scripts/maintenance.mjs --build-site
+      - name: Build unsigned distribution candidate
+        working-directory: desktop
+        run: npm run build
+      - name: Retain maintenance and build reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-reports-${{ github.sha }}
+          path: |
+            desktop/.build/maintenance-report.json
+            desktop/dist/build-report.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Retain unsigned app candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightingale-writer-arm64-${{ github.sha }}
+          path: desktop/dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+# Release signing and publication are owner-local steps after these checks pass.
+# This workflow has no signing secrets, write permission, or release action.
